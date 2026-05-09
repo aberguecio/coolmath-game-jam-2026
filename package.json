@@ -1,0 +1,17 @@
+{
+  "name": "coolmath-game-jam-2026",
+  "version": "0.1.0",
+  "description": "Coolmath Game Jam 2026 entry — https://itch.io/jam/coolmath-game-jam-2026",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.12"
+  }
+}
