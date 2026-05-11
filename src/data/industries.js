@@ -1,6 +1,7 @@
 // Industry / recipe registry. Each entry is a buildable factory: takes input commodities,
-// produces output commodities each cycle, pays a monthly salary that flows into the country
-// wage fund. Build cost paid upfront; ~90 days until operational.
+// produces output commodities each cycle, and employs `workforce` workers whose monthly
+// salary is `workforce × wageRate(country)` (Sprint A). Build cost paid upfront;
+// ~90 days until operational.
 //
 // Adding a recipe = one entry. Inputs/outputs reference producibles by id; the load-time
 // validator errors if any reference is missing.
@@ -13,7 +14,7 @@ export const INDUSTRIES = {
     inputs:  { corn: 3 },
     outputs: { flour: 1 },
     cycleDays: 7,             // produces every N days when inputs available
-    monthlySalary: 800,
+    workforce: 16,            // workers × wageRate = monthly salary (was monthlySalary: 800)
     buildCost: 6000,
     buildDays: 90,
   },
@@ -24,7 +25,7 @@ export const INDUSTRIES = {
     inputs:  { apple: 4 },
     outputs: { juice: 1 },
     cycleDays: 7,
-    monthlySalary: 1200,
+    workforce: 24,
     buildCost: 8000,
     buildDays: 90,
   },
@@ -35,7 +36,7 @@ export const INDUSTRIES = {
     inputs:  { gold: 1 },
     outputs: { jewelry: 1 },
     cycleDays: 14,
-    monthlySalary: 2500,
+    workforce: 50,
     buildCost: 14000,
     buildDays: 90,
   },
@@ -46,7 +47,7 @@ export const INDUSTRIES = {
     inputs:  { iron: 4 },
     outputs: { steel: 1 },
     cycleDays: 10,
-    monthlySalary: 1500,
+    workforce: 30,
     buildCost: 9000,
     buildDays: 90,
   },
@@ -57,7 +58,7 @@ export const INDUSTRIES = {
     inputs:  { copper: 2 },
     outputs: { cable: 1 },
     cycleDays: 10,
-    monthlySalary: 1400,
+    workforce: 28,
     buildCost: 8500,
     buildDays: 90,
   },
@@ -68,7 +69,7 @@ export const INDUSTRIES = {
     inputs:  { flour: 1, cherry: 1 },
     outputs: { pie: 1 },
     cycleDays: 5,
-    monthlySalary: 1800,
+    workforce: 36,
     buildCost: 10000,
     buildDays: 90,
   },

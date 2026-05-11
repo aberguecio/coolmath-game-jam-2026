@@ -62,21 +62,28 @@ const effectHandlers = {
     onApply(state, params, event) {
       const c = state.countries?.[params.country];
       if (!c) return;
-      event._prevPop = c.population;
       const f = params.factor ?? 1;
+      event._appliedFactor = f;       // remember exactly what we multiplied by
       c.population *= f;
-      // Re-scale current consumption snapshot
       for (const pid of Object.keys(c.consumption)) c.consumption[pid] *= f;
     },
     onRemove(state, params, event) {
       const c = state.countries?.[params.country];
-      if (!c || event._prevPop == null) return;
-      const f = c.population / event._prevPop;
-      c.population = event._prevPop;
+      if (!c) return;
+      // Reverse the exact factor we applied — safe even when events overlap.
+      const f = event._appliedFactor ?? (params.factor ?? 1);
+      if (!f) return;
+      c.population /= f;
       for (const pid of Object.keys(c.consumption)) c.consumption[pid] /= f;
     },
   },
 };
+
+function recordHistory(state, entry) {
+  if (!state.eventHistory) state.eventHistory = [];
+  state.eventHistory.push(entry);
+  if (state.eventHistory.length > 500) state.eventHistory.shift();
+}
 
 export function tickEvents(state) {
   state.activeEvents = state.activeEvents.filter(e => {
@@ -85,6 +92,11 @@ export function tickEvents(state) {
       const def = EVENT_TYPES[e.type];
       if (def) effectHandlers[def.effectId]?.onRemove?.(state, def.params, e);
       pushLog(state, `Ended: ${def?.label ?? e.type}`);
+      recordHistory(state, {
+        type: e.type, label: def?.label ?? e.type,
+        appliedDay: e.appliedDay ?? null, endedDay: state.time.totalDays,
+        country: def?.params?.country ?? null,
+      });
       return false;
     }
     return true;
@@ -92,7 +104,7 @@ export function tickEvents(state) {
 
   if (state.activeEvents.length < EVENTS.maxConcurrent && Math.random() < EVENTS.dailyChance) {
     const def = rollEventType();
-    const event = { type: def.id, daysRemaining: def.duration };
+    const event = { type: def.id, daysRemaining: def.duration, appliedDay: state.time.totalDays };
     effectHandlers[def.effectId]?.onApply?.(state, def.params, event);
     state.activeEvents.push(event);
     pushLog(state, `EVENT: ${def.label}`);

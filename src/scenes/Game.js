@@ -1,18 +1,20 @@
 import Phaser from 'phaser';
 import { GAME_WIDTH, GAME_HEIGHT } from '../config.js';
-import { MAP, TIME } from '../data/tunables.js';
+import { MAP, TIME, FARMING } from '../data/tunables.js';
 import { PRODUCIBLES, PRODUCIBLE_LIST } from '../data/producibles.js';
-import { COUNTRIES, COUNTRY_LIST, PLAYER_COUNTRY_ID } from '../data/countries.js';
+import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
+import { DISTANCES } from '../data/distances.js';
+import { EVENT_TYPES } from '../data/eventTypes.js';
 import { TUTORIAL_STEPS } from '../data/tutorialSteps.js';
 import {
-  createInitialState, initAIFarmers, tilePrice, pushLog, persistTutorial,
+  createInitialState, initAIFarmers, tilePrice, pushLog, pushFx, persistTutorial,
 } from '../state/GameState.js';
 import { tickClock, setSpeed, formatDate } from '../systems/Clock.js';
 import {
-  tickMarket, priceOf, priceTrend, tickCountriesYearly,
+  tickMarket, priceTrend, tickCountriesYearly,
   sellFromInventory, buyFromGlobal, inventoryOf,
   effectiveProductionFor, elasticityFor, elasticityTargetFor,
-  populationSpend, marketInventoryOf,
+  populationSpend, marketInventoryOf, tradeFlowVolume,
 } from '../systems/Market.js';
 import {
   tickIndustries, tickIndustrySalaries, tickFiscalCrisis, seedIndustries,
@@ -20,9 +22,20 @@ import {
 import { INDUSTRIES } from '../data/industries.js';
 import {
   tickFarming, buyTile, plowTile, plantTile, harvestTile, loteTile,
-  tileFinanceQuote, toggleAutoReplant,
+  tileFinanceQuote, expectedYield, effectiveQualityFor,
+  lockTypeForCategory, uprootTile,
 } from '../systems/Farming.js';
-import { surveyTile, mineralRichness, canMineHere } from '../systems/Mining.js';
+import {
+  effectiveHarvestCost, effectiveMonthlyOpCost, effectiveSetupCost,
+  effectivePlowCost, effectiveSurveyCost, effectiveSalary,
+} from '../systems/Inflation.js';
+import { tickLaborMarket, wageRateFor } from '../systems/Labor.js';
+import { tickStorageCost, storageBillFor } from '../systems/Storage.js';
+import { INDUSTRY } from '../data/tunables.js';
+import {
+  surveyTile, mineralRichness, canMineHere, tickMiningOps,
+  closeMine, reopenMine,
+} from '../systems/Mining.js';
 import { MINERALS, OFFERS } from '../data/tunables.js';
 import {
   acceptOffer, rejectOffer, counterOffer, makePurchaseOffer,
@@ -34,7 +47,7 @@ import {
 } from '../systems/Bank.js';
 import { tickCityYearly, cityRadius, distanceToCity, isInsideHalo, lotePrice } from '../systems/City.js';
 import { tickAI, tickAIMonthly } from '../systems/AI.js';
-import { tickEvents, activeEventLabels } from '../systems/Events.js';
+import { tickEvents } from '../systems/Events.js';
 import { LOAN_PRODUCTS, LOAN_PRODUCT_LIST, resolveMaxPrincipal } from '../data/loanProducts.js';
 import { startMusic, toggleMute, isMusicMuted } from '../systems/Music.js';
 import { play as playSfx } from '../systems/Sfx.js';
@@ -73,6 +86,26 @@ export class Game extends Phaser.Scene {
     super('Game');
   }
 
+  // Modal speed-pause manager. Multiple modals can stack; we only save the
+  // pre-pause speed on the FIRST entry and only restore on the LAST exit.
+  // Avoids the clobber where modal-B saves speed=0 (already paused by A) and
+  // then closing A first restores to 0 instead of the user's real speed.
+  enterModal() {
+    const s = this.state;
+    s.ui.modalCount = (s.ui.modalCount || 0) + 1;
+    if (s.ui.modalCount === 1) {
+      s.ui.savedSpeedIdx = s.time.speedIdx;
+      setSpeed(s, 0);
+    }
+  }
+  exitModal() {
+    const s = this.state;
+    s.ui.modalCount = Math.max(0, (s.ui.modalCount || 0) - 1);
+    if (s.ui.modalCount === 0) {
+      setSpeed(s, s.ui.savedSpeedIdx ?? 1);
+    }
+  }
+
   create() {
     this.state = createInitialState();
     initAIFarmers(this.state);
@@ -90,6 +123,10 @@ export class Game extends Phaser.Scene {
     this.buildCountryChart();
     this.buildOfferModal();
     this.buildMarketModal();
+    this.buildPriceChartModal();
+    this.buildEventsModal();
+    this.buildCompaniesModal();
+    this.buildWorldModal();
     this.buildTutorialOverlay();
     this.offerMarkers = [];
 
@@ -107,7 +144,11 @@ export class Game extends Phaser.Scene {
     }
     this.input.keyboard.on('keydown-ESC', () => {
       if (this.state.ui.offerOpen) { this.closeOfferModal(); return; }
+      if (this.state.ui.priceChartOpen) { this.togglePriceChart(false); return; }
       if (this.state.ui.marketOpen) { this.toggleMarket(false); return; }
+      if (this.state.ui.eventsOpen) { this.toggleEvents(false); return; }
+      if (this.state.ui.companiesOpen) { this.toggleCompanies(false); return; }
+      if (this.state.ui.worldOpen) { this.toggleWorld(false); return; }
       if (this.state.ui.countryChartOpen) { this.closeCountryChart(); return; }
       if (this.state.ui.bankOpen) { this.toggleBank(false); return; }
       this.state.selection.tileId = null;
@@ -233,8 +274,11 @@ export class Game extends Phaser.Scene {
         else if (tile.state === 'planted') {
           const def = tile.crop ? PRODUCIBLES[tile.crop] : null;
           if (def) {
+            // Mining tiles use a rocky-grey base instead of the brown soil base
+            // so the player can tell at a glance "this is a mine, not a crop".
+            const baseColor = def.category === 'mining' ? 0x3a3a42 : 0x6b4a2a;
             const interp = Phaser.Display.Color.Interpolate.ColorWithColor(
-              Phaser.Display.Color.IntegerToColor(0x6b4a2a),
+              Phaser.Display.Color.IntegerToColor(baseColor),
               Phaser.Display.Color.IntegerToColor(def.color),
               100,
               Math.floor(tile.growth * 100),
@@ -333,36 +377,81 @@ export class Game extends Phaser.Scene {
   // -----------------------------------------------------------------------
   // TOP BAR
   // -----------------------------------------------------------------------
+  // Builds a single icon-style button at position x with width w. `accent` is
+  // the resting fill, `hover` is the hover fill. Returns { bg, txt }.
+  makeIconButton(x, w, label, accent, hover, onClick, tooltip) {
+    const bg = this.add.rectangle(x, 8, w, 28, accent).setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true });
+    const txt = this.add.text(x + w / 2, 22, label, {
+      fontFamily: 'monospace', fontSize: '12px', color: '#0f1923', fontStyle: 'bold',
+    }).setOrigin(0.5);
+    bg.on('pointerover', () => { bg.setFillStyle(hover); if (tooltip) this.showTopTooltip(x + w / 2, tooltip); });
+    bg.on('pointerout', () => { bg.setFillStyle(accent); this.hideTopTooltip(); });
+    bg.on('pointerdown', onClick);
+    return { bg, txt };
+  }
+
+  showTopTooltip(cx, text) {
+    if (!this.topTooltip) {
+      this.topTooltipBg = this.add.rectangle(0, 0, 10, 18, 0x0f1923, 0.95).setOrigin(0.5, 0).setDepth(99);
+      this.topTooltip = this.add.text(0, 0, '', {
+        fontFamily: 'monospace', fontSize: '10px', color: '#e8edf3',
+      }).setOrigin(0.5, 0).setDepth(100);
+    }
+    this.topTooltip.setText(text).setVisible(true);
+    this.topTooltipBg.width = this.topTooltip.width + 10;
+    this.topTooltipBg.x = cx;
+    this.topTooltipBg.y = 38;
+    this.topTooltip.x = cx;
+    this.topTooltip.y = 40;
+    this.topTooltipBg.setVisible(true);
+  }
+  hideTopTooltip() {
+    if (this.topTooltip) { this.topTooltip.setVisible(false); this.topTooltipBg.setVisible(false); }
+  }
+
   buildTopBar() {
     this.topBg = this.add.rectangle(0, 0, GAME_WIDTH, 44, 0x131e2b).setOrigin(0, 0);
     this.topText = this.add.text(12, 12, '', {
       fontFamily: 'monospace', fontSize: '12px', color: '#e8edf3',
     });
 
+    // Right-aligned button row. Layout right-to-left:
+    // [speed buttons] [BANK] [MARKET] [WORLD] [EVENTS] [COMPANIES] [music]
     const speedCount = TIME.speedLabels.length;
-    const bankBtnX = GAME_WIDTH - speedCount * 38 - 8 - 90;
-    this.bankBtnBg = this.add.rectangle(bankBtnX, 8, 80, 28, 0x6ee7b7).setOrigin(0, 0)
-      .setInteractive({ useHandCursor: true });
-    this.bankBtnTxt = this.add.text(bankBtnX + 40, 22, '🏦 BANK', {
-      fontFamily: 'monospace', fontSize: '12px', color: '#0f1923', fontStyle: 'bold',
-    }).setOrigin(0.5);
-    this.bankBtnBg.on('pointerover', () => this.bankBtnBg.setFillStyle(0x9af0d2));
-    this.bankBtnBg.on('pointerout', () => this.bankBtnBg.setFillStyle(0x6ee7b7));
-    this.bankBtnBg.on('pointerdown', () => this.toggleBank(true));
+    let cursor = GAME_WIDTH - speedCount * 38 - 8;          // left edge of speed group
+    const ICON_W = 36;
+    const GAP = 4;
 
-    // MARKET button — left of BANK
-    const marketBtnX = bankBtnX - 88;
-    this.marketBtnBg = this.add.rectangle(marketBtnX, 8, 80, 28, 0xffb347).setOrigin(0, 0)
-      .setInteractive({ useHandCursor: true });
-    this.marketBtnTxt = this.add.text(marketBtnX + 40, 22, '📈 MARKET', {
-      fontFamily: 'monospace', fontSize: '12px', color: '#0f1923', fontStyle: 'bold',
-    }).setOrigin(0.5);
-    this.marketBtnBg.on('pointerover', () => this.marketBtnBg.setFillStyle(0xffc878));
-    this.marketBtnBg.on('pointerout', () => this.marketBtnBg.setFillStyle(0xffb347));
-    this.marketBtnBg.on('pointerdown', () => this.toggleMarket(true));
+    const place = (w) => { cursor -= (w + GAP); return cursor; };
 
-    // Music toggle — left of MARKET
-    const musicX = marketBtnX - 36;
+    // BANK
+    const bankX = place(ICON_W);
+    this.bankBtn = this.makeIconButton(bankX, ICON_W, '🏦', 0x6ee7b7, 0x9af0d2,
+      () => this.toggleBank(true), 'Bank');
+
+    // MARKET
+    const marketX = place(ICON_W);
+    this.marketBtn = this.makeIconButton(marketX, ICON_W, '📈', 0xffb347, 0xffc878,
+      () => this.toggleMarket(true), 'Market');
+
+    // WORLD
+    const worldX = place(ICON_W);
+    this.worldBtn = this.makeIconButton(worldX, ICON_W, '🌍', 0x60b3ff, 0x88c8ff,
+      () => this.toggleWorld(true), 'World');
+
+    // EVENTS
+    const eventsX = place(ICON_W);
+    this.eventsBtn = this.makeIconButton(eventsX, ICON_W, '⚡', 0xf7c948, 0xfbd970,
+      () => this.toggleEvents(true), 'Events history');
+
+    // COMPANIES
+    const companiesX = place(ICON_W);
+    this.companiesBtn = this.makeIconButton(companiesX, ICON_W, '🏭', 0xc792ea, 0xd9b3f0,
+      () => this.toggleCompanies(true), 'Companies');
+
+    // Music — small grey icon at the leftmost slot
+    const musicX = place(28);
     this.musicBtnBg = this.add.rectangle(musicX, 8, 28, 28, 0x243345).setOrigin(0, 0)
       .setInteractive({ useHandCursor: true });
     this.musicBtnTxt = this.add.text(musicX + 14, 22, isMusicMuted() ? '🔇' : '♪', {
@@ -394,9 +483,11 @@ export class Game extends Phaser.Scene {
     const cuota = totalMonthlyPayment(s, 'player');
     const loans = loansOf(s, 'player').length;
     const here = COUNTRIES[s.ui.currentMap]?.name ?? s.ui.currentMap;
+    const storage = storageBillFor(s, 'player', PLAYER_COUNTRY_ID);
+    const storageStr = storage > 0 ? `   📦 $${storage}/mo` : '';
     this.topText.setText(
       `📅 ${formatDate(s)}   💰 $${Math.round(s.player.cash)}   🏦 $${Math.round(debt)} (${loans})   ` +
-      `mo $${Math.round(cuota)}   📍 ${here}`,
+      `mo $${Math.round(cuota)}${storageStr}   📍 ${here}`,
     );
     for (const b of this.speedButtons) {
       const active = b.idx === s.time.speedIdx;
@@ -414,61 +505,81 @@ export class Game extends Phaser.Scene {
       fontFamily: 'monospace', fontSize: '11px', color: '#e8edf3', wordWrap: { width: PANEL_W - 12 },
     });
     this.actionButtons = [];
-
-    const yCountries = GAME_HEIGHT - 340;
-    this.countriesTitle = this.add.text(PANEL_X + 6, yCountries, 'COUNTRIES (click for chart)', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-    });
-    this.countriesY = yCountries + 14;
-    this.countryRows = [];   // rebuilt each refresh
-
-    const yMarket = GAME_HEIGHT - 250;
-    this.marketTitle = this.add.text(PANEL_X + 6, yMarket, 'MARKET', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-    });
-    this.marketText = this.add.text(PANEL_X + 6, yMarket + 12, '', {
-      fontFamily: 'monospace', fontSize: '9px', color: '#e8edf3', lineSpacing: 0,
-    });
-
-    const yEvents = GAME_HEIGHT - 170;
-    this.eventsTitle = this.add.text(PANEL_X + 6, yEvents, 'EVENTS', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-    });
-    this.eventsText = this.add.text(PANEL_X + 6, yEvents + 14, '', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#ffb347', wordWrap: { width: PANEL_W - 12 },
-    });
-
-    const yLog = GAME_HEIGHT - 130;
-    this.logTitle = this.add.text(PANEL_X + 6, yLog, 'LOG', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-    });
-    this.logText = this.add.text(PANEL_X + 6, yLog + 14, '', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#9aa4ad', wordWrap: { width: PANEL_W - 12 },
-    });
+    // Countries / market / events / log used to live here. They moved to their
+    // dedicated modals (🌍 World, 📈 Market, ⚡ Events). The freed vertical
+    // space goes to tile info and tile actions.
   }
 
   clearActionButtons() {
     for (const b of this.actionButtons) {
       b.bg.destroy();
       b.txt.destroy();
+      if (b.hint) b.hint.destroy();
+      if (b.knob) b.knob.destroy();
     }
     this.actionButtons = [];
   }
 
+  // Toggle switch widget — visually distinct from action buttons. Pill-shape
+  // with a knob that slides left/right based on `on`. Used for persistent
+  // settings (Auto-manage) rather than one-shot actions (Plow, Plant).
+  addToggleSwitch(label, y, on, onClick, hint = '') {
+    const w = PANEL_W - 16;
+    const h = 30;
+    const trackColor = on ? 0x2a8a5a : 0x3a4d63;
+    const bg = this.add.rectangle(PANEL_X + 6, y, w, h, trackColor)
+      .setOrigin(0, 0)
+      .setStrokeStyle(1, on ? 0x6ee7b7 : 0x566370)
+      .setInteractive({ useHandCursor: true });
+    const knobX = on ? (PANEL_X + 6 + w - 20) : (PANEL_X + 6 + 4);
+    const knob = this.add.rectangle(knobX, y + 4, 16, h - 8,
+      on ? 0xe8edf3 : 0xcdd6df).setOrigin(0, 0);
+    const labelTxt = this.add.text(PANEL_X + 28, y + 4, label, {
+      fontFamily: 'monospace', fontSize: '10px',
+      color: '#e8edf3', fontStyle: 'bold',
+    }).setOrigin(0, 0);
+    const hintTxt = hint ? this.add.text(PANEL_X + 28, y + 17, hint, {
+      fontFamily: 'monospace', fontSize: '8px', color: '#cdd6df',
+      wordWrap: { width: w - 50 },
+    }).setOrigin(0, 0) : null;
+    bg.on('pointerover', () => bg.setFillStyle(on ? 0x3aaa6a : 0x4a5f7a));
+    bg.on('pointerout', () => bg.setFillStyle(trackColor));
+    bg.on('pointerdown', onClick);
+    this.actionButtons.push({ bg, txt: labelTxt, hint: hintTxt, knob });
+    return y + h + 4;
+  }
+
   addActionButton(label, y, enabled, onClick, hint = '', color = 0x2a4a6a) {
-    const bg = this.add.rectangle(PANEL_X + 6, y, PANEL_W - 16, 24, enabled ? color : 0x1d2a3a)
+    const w = PANEL_W - 16;
+    const innerW = w - 12;
+    const h = hint ? 32 : 22;
+    const bg = this.add.rectangle(PANEL_X + 6, y, w, h, enabled ? color : 0x1d2a3a)
       .setOrigin(0, 0)
       .setInteractive({ useHandCursor: enabled });
-    const txt = this.add.text(PANEL_X + 12, y + 12, label + (hint ? `  ${hint}` : ''), {
-      fontFamily: 'monospace', fontSize: '10px', color: enabled ? '#e8edf3' : '#566370',
-    }).setOrigin(0, 0.5);
+    const labelTxt = this.add.text(PANEL_X + 12, y + 4, label, {
+      fontFamily: 'monospace', fontSize: '10px',
+      color: enabled ? '#e8edf3' : '#566370',
+      fontStyle: 'bold',
+      wordWrap: { width: innerW },
+    });
+    const nodes = [bg, labelTxt];
+    let hintTxt = null;
+    if (hint) {
+      hintTxt = this.add.text(PANEL_X + 12, y + 18, hint, {
+        fontFamily: 'monospace', fontSize: '9px',
+        color: enabled ? '#9aa4ad' : '#3d4854',
+        wordWrap: { width: innerW },
+      });
+      nodes.push(hintTxt);
+    }
     if (enabled) {
       bg.on('pointerover', () => bg.setFillStyle(0x3a6090));
       bg.on('pointerout', () => bg.setFillStyle(color));
       bg.on('pointerdown', onClick);
     }
-    this.actionButtons.push({ bg, txt });
-    return y + 27;
+    // Track all nodes so clearActionButtons cleans them up.
+    this.actionButtons.push({ bg, txt: labelTxt, hint: hintTxt });
+    return y + h + 3;
   }
 
   refreshPanel() {
@@ -482,12 +593,18 @@ export class Game extends Phaser.Scene {
     if (!tile) {
       this.panelText.setText('Hover or click a tile.\n\nClick once to select and see actions.\n\nKeys: 1/2/3 speed, SPACE pause, ESC deselect.');
     } else {
+      // For mining tiles, show "mining" / "ready" instead of "planted" / "mature".
+      const cropDef = tile.crop ? PRODUCIBLES[tile.crop] : null;
+      const isMining = cropDef && cropDef.category === 'mining';
+      const stateText = isMining
+        ? (tile.state === 'planted' ? 'mining' : tile.state === 'mature' ? 'ready' : (STATE_LABEL[tile.state] || tile.state))
+        : (STATE_LABEL[tile.state] || tile.state);
       const lines = [
         `Tile (${tile.x},${tile.y})`,
         `Owner: ${this.ownerLabel(tile)}`,
         `Quality: ${(tile.quality * 100).toFixed(0)}%`,
         `City dist: ${distanceToCity(tile, s.city).toFixed(1)}`,
-        `State: ${STATE_LABEL[tile.state] || tile.state}`,
+        `State: ${stateText}`,
       ];
       // Industry on this tile? Show recipe + status + monthly P&L.
       if (tile.industryId) {
@@ -499,7 +616,7 @@ export class Game extends Phaser.Scene {
             const outs = Object.entries(recipe.outputs).map(([k, v]) => `${v}× ${k}`).join(' + ');
             lines.push(`🏭 ${recipe.name} [${ind.status}]`);
             lines.push(`   ${ins} → ${outs}`);
-            lines.push(`   cycle ${recipe.cycleDays}d · salary $${recipe.monthlySalary}/mo`);
+            lines.push(`   cycle ${recipe.cycleDays}d · ${recipe.workforce} workers × $${Math.round(wageRateFor(s, tile.countryId))} = $${effectiveSalary(s, tile.countryId, recipe)}/mo`);
             if (ind.status === 'building') {
               const left = recipe.buildDays - (s.time.totalDays - ind.startBuildDay);
               lines.push(`   building: ${Math.max(0, left)}d left`);
@@ -516,8 +633,48 @@ export class Game extends Phaser.Scene {
       }
       if (tile.crop && !tile.industryId) {
         const def = PRODUCIBLES[tile.crop];
-        lines.push(`Crop: ${def.name}`);
-        if (tile.state === 'planted') lines.push(`Growth: ${(tile.growth * 100).toFixed(0)}%`);
+        const isMining = def.category === 'mining';
+        if (isMining) {
+          const richness = mineralRichness(tile, def.id);
+          lines.push(`⛏ Mining: ${def.name} (${(richness * 100).toFixed(0)}% rich)`);
+          if (tile.state === 'planted') lines.push(`Extraction: ${(tile.growth * 100).toFixed(0)}%`);
+          // Monthly operating cost (always charged for mines)
+          const opCost = effectiveMonthlyOpCost(s, tile.countryId, def);
+          if (opCost > 0) lines.push(`Ops cost: $${opCost}/mo${tile.miningStalled ? ' ⚠ STALLED' : ''}`);
+        } else {
+          lines.push(`Crop: ${def.name}`);
+          if (tile.state === 'planted') lines.push(`Growth: ${(tile.growth * 100).toFixed(0)}%`);
+          // Estimated harvest economics — visible BEFORE harvesting so the player isn't surprised.
+          const yieldEst = expectedYield(def, effectiveQualityFor(def, tile));
+          const priceNow = Math.round(s.market.prices?.[tile.countryId]?.[def.id] || 0);
+          const revEst = priceNow * yieldEst;
+          const labor = effectiveHarvestCost(s, tile.countryId, def);
+          const auto = tile.autoMode === true || tile.owner !== 'player';
+          const laborText = auto ? `−$${labor} (auto)` : `−$0 (manual)`;
+          const net = revEst - (auto ? labor : 0);
+          const netColor = net >= 0 ? '🟢' : '🔴';
+          lines.push(`Est. revenue: $${revEst} (${yieldEst}u × $${priceNow})`);
+          lines.push(`Harvest labor: ${laborText}`);
+          lines.push(`Net (est.): ${netColor} $${net}`);
+          // Grace-period warning + skip indicator on mature tiles.
+          if (tile.state === 'mature' && tile.matureSinceDay != null) {
+            const sinceMature = s.time.totalDays - tile.matureSinceDay;
+            const daysToRot = FARMING.harvestGraceDays - sinceMature;
+            if ((tile.skipStreak || 0) > 0) {
+              lines.push(`⏸ Auto-skipped × ${tile.skipStreak} (price too low for labor)`);
+            }
+            if (daysToRot <= 10) {
+              const verb = def.perennial ? 'fruit lost' : 'rots to fallow';
+              lines.push(`⏱ ${verb} in ${Math.max(0, daysToRot)}d if not harvested`);
+            }
+          }
+        }
+      }
+      if (tile.lockType) {
+        const lockEmoji = tile.lockType === 'crop' ? '🌾'
+                         : tile.lockType === 'mining' ? '⛏'
+                         : '🏭';
+        lines.push(`🔒 Locked to ${lockEmoji} ${tile.lockType}`);
       }
       if (tile.owner === 'wild') lines.push(`Price: $${tilePrice(tile, s)}`);
       if (isInsideHalo(tile, s.city)) lines.push(`City halo · lot: $${lotePrice(tile, s.city)}`);
@@ -539,7 +696,10 @@ export class Game extends Phaser.Scene {
       }
       this.panelText.setText(lines.join('\n'));
 
-      let y = MAP_OFFSET_Y + 8 + lines.length * 13 + 10;
+      // Use the actual rendered height of the wrapped text instead of guessing
+      // `lines.length * 13` — wrapped lines (e.g. long "Locked to..." labels)
+      // would otherwise overlap the action buttons.
+      let y = this.panelText.y + this.panelText.height + 10;
 
       // Foreign maps are read-only (player only operates in home).
       if (!isHomeView) {
@@ -617,16 +777,17 @@ export class Game extends Phaser.Scene {
       if (isHomeView && tile.owner === 'player' && s.selection.tileId === tile.id) {
         // Survey state-aware action: not surveyed → button; surveyed empty → disabled status.
         if (!tile.surveyed) {
+          const surveyEffective = effectiveSurveyCost(s, tile.countryId);
           y = this.addActionButton(
             `Survey land`,
             y,
-            s.player.cash >= MINERALS.surveyCost,
+            s.player.cash >= surveyEffective,
             () => {
               const r = surveyTile(s, tile);
               if (!r.ok && r.reason) pushLog(s, r.reason);
               this.refreshAll();
             },
-            `$${MINERALS.surveyCost} · reveals minerals`,
+            `$${surveyEffective} · reveals minerals`,
             0xb27a3a,
           );
         } else {
@@ -641,58 +802,127 @@ export class Game extends Phaser.Scene {
             );
           }
         }
-        if (tile.state === 'fallow') {
-          y = this.addActionButton(`Plow`, y, s.player.cash >= 50, () => {
+        // Plow only makes sense for crops. Hide if the tile is locked to mining
+        // or industry — plow won't lead anywhere useful.
+        if (tile.state === 'fallow' && (tile.lockType == null || tile.lockType === 'crop')) {
+          const plowEffective = effectivePlowCost(s, tile.countryId);
+          y = this.addActionButton(`Plow`, y, s.player.cash >= plowEffective, () => {
             const r = plowTile(s, tile); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll();
-          }, `$50`);
+          }, `$${plowEffective}`);
         }
-        // Plowed tile → producibles that need plowing
+        // Plowed tile → crops that need plowing. Filtered by lockType so we don't
+        // show "Plant Wheat" on a tile locked to mining (it would be rejected).
         if (tile.state === 'plowed') {
           for (const def of PRODUCIBLE_LIST) {
+            if (def.category === 'processed') continue;        // industry-only outputs
             if (def.requiresPlow === false) continue;
+            const wantLock = lockTypeForCategory(def.category);
+            if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
+            const setupEff = effectiveSetupCost(s, tile.countryId, def);
             y = this.addActionButton(
               `${def.actionVerb || 'Plant'} ${def.name}`,
               y,
-              s.player.cash >= def.seedCost,
+              s.player.cash >= setupEff,
               () => { const r = plantTile(s, tile, def.id); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll(); },
-              `$${def.seedCost} · ${def.growthDays}d`,
+              `$${setupEff} · ${def.growthDays}d`,
             );
           }
         }
-        // Fallow tile → producibles that don't need plowing (e.g. mining).
-        // Mining options only appear when the tile is surveyed and has the deposit.
+        // Fallow tile → producibles that don't need plowing (e.g. mining). Same
+        // lockType filter so an ex-crop tile doesn't offer mining and vice-versa.
         if (tile.state === 'fallow') {
           for (const def of PRODUCIBLE_LIST) {
+            if (def.category === 'processed') continue;        // industry-only outputs
             if (def.requiresPlow !== false) continue;
             if (def.category === 'mining' && !canMineHere(tile, def)) continue;
+            const wantLock = lockTypeForCategory(def.category);
+            if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
             const richness = mineralRichness(tile, def.id);
             const richHint = def.category === 'mining' ? ` · ${(richness * 100).toFixed(0)}% rich` : '';
+            const setupEff = effectiveSetupCost(s, tile.countryId, def);
             y = this.addActionButton(
               `${def.actionVerb || 'Plant'} ${def.name}`,
               y,
-              s.player.cash >= def.seedCost,
+              s.player.cash >= setupEff,
               () => { const r = plantTile(s, tile, def.id); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll(); },
-              `$${def.seedCost} · ${def.growthDays}d${richHint}`,
+              `$${setupEff} · ${def.growthDays}d${richHint}`,
             );
           }
         }
-        // Mature tiles auto-harvest in tickFarming — no manual button needed.
+        // Manual harvest button — only shown when tile is mature AND owner is in
+        // manual mode (autoMode off). Clicking it = the player did the harvest
+        // themselves, so NO labor cost is charged. Auto-mode tiles harvest on their
+        // own and pay harvestCost via autoHarvest.
+        if (tile.state === 'mature' && tile.crop && tile.autoMode !== true) {
+          const def = PRODUCIBLES[tile.crop];
+          const yieldEst = expectedYield(def, effectiveQualityFor(def, tile));
+          const priceNow = Math.round(s.market.prices?.[tile.countryId]?.[def.id] || 0);
+          y = this.addActionButton(
+            `🌾 Harvest ${def.name}`,
+            y, true,
+            () => { harvestTile(s, tile); this.refreshAll(); },
+            `+$${yieldEst * priceNow} · no labor cost`,
+            0x2a8a5a,
+          );
+        }
 
-        // Auto-replant toggle for annual crops. Perennials regrow by themselves.
-        if (tile.crop) {
-          const cdef = PRODUCIBLES[tile.crop];
-          if (cdef && !cdef.perennial) {
-            const isOn = tile.autoReplant === true;
-            const cycleCost = (cdef.requiresPlow ? 50 : 0) + cdef.seedCost;
-            y = this.addActionButton(
-              isOn ? `↻ Loop ON — auto-replant ${cdef.name}` : `↻ Loop OFF — manual replant`,
-              y, true,
-              () => { toggleAutoReplant(s, tile); this.refreshAll(); },
-              isOn ? `${cycleCost}/cycle` : 'click to enable',
-              isOn ? 0x2a8a5a : 0x4a3a6a,
+        // Auto-manage switch — when ON, the tile hires labor: auto-harvests
+        // (paying harvestCost) AND auto-replants annuals (paying setup again).
+        // Manual mode = player clicks Harvest themselves for $0 labor.
+        if (tile.crop && tile.owner === 'player') {
+          const def = PRODUCIBLES[tile.crop];
+          const isMining = def.category === 'mining';
+          if (!isMining) {                                  // mining is always auto
+            const isAuto = tile.autoMode === true;
+            const labor = effectiveHarvestCost(s, tile.countryId, def);
+            const plow = def.requiresPlow ? effectivePlowCost(s, tile.countryId) : 0;
+            const setup = effectiveSetupCost(s, tile.countryId, def) + plow;
+            const hint = isAuto
+              ? `auto-harvest $${labor} + replants ($${setup}/cycle)`
+              : 'click harvest yourself · no labor cost';
+            y = this.addToggleSwitch(
+              '🤖 Auto-manage', y, isAuto,
+              () => { tile.autoMode = !tile.autoMode; this.refreshAll(); },
+              hint,
             );
           }
         }
+
+        // Mining open/close toggle — closed mines pay no labor and don't produce.
+        // Reopening costs a fraction of seedCost (restart fee).
+        if (tile.crop && tile.owner === 'player') {
+          const def = PRODUCIBLES[tile.crop];
+          if (def.category === 'mining') {
+            const isOpen = tile.miningStatus !== 'closed';
+            const reopenCost = Math.round(effectiveSetupCost(s, tile.countryId, def) * INDUSTRY.reopenCostFactor);
+            const hint = isOpen
+              ? `pays ${effectiveMonthlyOpCost(s, tile.countryId, def)}/mo · producing`
+              : `reopen costs $${reopenCost}`;
+            y = this.addToggleSwitch(
+              isOpen ? '⛏ Mine OPEN' : '⛏ Mine CLOSED',
+              y, isOpen,
+              () => {
+                const r = isOpen ? closeMine(s, tile) : reopenMine(s, tile);
+                if (!r.ok && r.reason) pushLog(s, r.reason);
+                this.refreshAll();
+              },
+              hint,
+            );
+          }
+        }
+
+        // Uproot button — works on any venture (crop in any state, mine,
+        // industry). Tile returns to fallow but lockType is preserved.
+        if (tile.crop && tile.owner === 'player') {
+          y = this.addActionButton(
+            '🪓 Uproot',
+            y, true,
+            () => { uprootTile(s, tile); this.refreshAll(); },
+            'clears venture · tile category lock stays',
+            0x8a3a3a,
+          );
+        }
+
         if (isInsideHalo(tile, s.city) && tile.state !== 'planted' && tile.state !== 'mature' && tile.state !== 'lot') {
           const price = lotePrice(tile, s.city);
           y = this.addActionButton(`Develop & sell`, y, price > 0, () => {
@@ -702,59 +932,8 @@ export class Game extends Phaser.Scene {
       }
     }
 
-    // Countries panel — clickable rows. Each shows population + net trade balance summary.
-    for (const node of this.countryRows) node.destroy();
-    this.countryRows = [];
-    let cy = this.countriesY;
-    for (const c of COUNTRY_LIST) {
-      const run = s.countries[c.id];
-      const netBalance = PRODUCIBLE_LIST.reduce(
-        (acc, def) => acc + (run.tradeBalanceEMA?.[def.id] ?? 0),
-        0,
-      );
-      const isPlayer = c.id === PLAYER_COUNTRY_ID;
-      const arrow = netBalance > 0.5 ? '⇧' : netBalance < -0.5 ? '⇩' : '·';
-      const balColor = netBalance > 0.5 ? '#ff8c8c' : netBalance < -0.5 ? '#8cffaa' : '#cdd6df';
-      const popStr = c.population >= 100
-        ? `${Math.round(run.population)}M`
-        : `${run.population.toFixed(1)}M`;
-
-      const rowBg = this.add.rectangle(PANEL_X + 6, cy, PANEL_W - 16, 14, isPlayer ? 0x1a3a2a : 0x1a2633)
-        .setOrigin(0, 0).setInteractive({ useHandCursor: true });
-      const nameTxt = this.add.text(PANEL_X + 10, cy + 7, `${c.name}`, {
-        fontFamily: 'monospace', fontSize: '10px', color: isPlayer ? '#6ee7b7' : '#cdd6df',
-      }).setOrigin(0, 0.5);
-      const popTxt = this.add.text(PANEL_X + 70, cy + 7, popStr, {
-        fontFamily: 'monospace', fontSize: '10px', color: '#9aa4ad',
-      }).setOrigin(0, 0.5);
-      const balTxt = this.add.text(PANEL_X + PANEL_W - 22, cy + 7,
-        `${arrow} ${Math.round(Math.abs(netBalance))}`, {
-        fontFamily: 'monospace', fontSize: '10px', color: balColor,
-      }).setOrigin(1, 0.5);
-      rowBg.on('pointerover', () => rowBg.setFillStyle(isPlayer ? 0x244d3a : 0x243345));
-      rowBg.on('pointerout', () => rowBg.setFillStyle(isPlayer ? 0x1a3a2a : 0x1a2633));
-      rowBg.on('pointerdown', () => this.openCountryChart(c.id));
-      this.countryRows.push(rowBg, nameTxt, popTxt, balTxt);
-      cy += 16;
-    }
-
-    // Market: name · price · stock · trend (compact for many producibles)
-    const marketLines = PRODUCIBLE_LIST.map(def => {
-      const p = priceOf(s, def.id);
-      const stock = Math.round(s.market.inventory?.['home']?.[def.id] || 0);
-      const t = priceTrend(s, def.id, 7);
-      const arrow = t > 0.02 ? '▲' : t < -0.02 ? '▼' : '·';
-      return `${def.name.slice(0, 7).padEnd(7)} $${String(p).padStart(5)} ${String(stock).padStart(5)} ${arrow}${(t * 100).toFixed(1)}%`;
-    });
-    this.marketText.setText(marketLines.join('\n'));
-
-    // Events
-    const labels = activeEventLabels(s);
-    this.eventsText.setText(labels.length ? labels.join(' · ') : '—');
-
-    // Log
-    const logLines = s.log.slice(0, 4).map(l => `d${l.day}: ${l.text}`);
-    this.logText.setText(logLines.join('\n'));
+    // Countries / market / events / log used to render here. They live in their
+    // dedicated modals now (🌍 World, 📈 Market, ⚡ Events).
   }
 
   ownerLabel(tile) {
@@ -866,13 +1045,10 @@ export class Game extends Phaser.Scene {
     backdrop.on('pointerdown', () => this.closeCountryChart());
     this.chartGroup.add(backdrop);
 
-    // Card height adapts to producible count.
-    const w = 560;
-    const rowH = 36;
-    const headerH = 90;
-    const padding = 24;
-    const h = Math.min(GAME_HEIGHT - 20,
-      headerH + (PRODUCIBLE_LIST?.length ?? 8) * rowH + padding);
+    // Fixed-height card: title bar at top, country info block, market table
+    // (scrollable). Body adapts but card stays fixed so scroll is meaningful.
+    const w = 600;
+    const h = Math.min(GAME_HEIGHT - 16, 560);
     const x = (GAME_WIDTH - w) / 2, y = (GAME_HEIGHT - h) / 2;
     const card = this.add.rectangle(x, y, w, h, 0x131e2b)
       .setOrigin(0, 0).setStrokeStyle(2, 0xcdd6df).setInteractive();
@@ -883,37 +1059,44 @@ export class Game extends Phaser.Scene {
     });
     this.chartGroup.add(this.chartTitle);
 
-    this.chartSubtitle = this.add.text(x + 18, y + 40, '', {
-      fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
-    });
-    this.chartGroup.add(this.chartSubtitle);
-
-    this.chartLegend = this.add.text(x + 18, y + 58,
-      '⇧ importing (buying)   ⇩ exporting (selling)', {
-      fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-    });
-    this.chartGroup.add(this.chartLegend);
-
     const closeBtn = this.add.rectangle(x + w - 36, y + 14, 24, 24, 0x2a4a6a)
       .setOrigin(0, 0).setInteractive({ useHandCursor: true });
     const closeTxt = this.add.text(x + w - 24, y + 26, '✕', {
       fontFamily: 'monospace', fontSize: '13px', color: '#e8edf3',
     }).setOrigin(0.5);
+    closeBtn.on('pointerover', () => closeBtn.setFillStyle(0x3a6090));
+    closeBtn.on('pointerout', () => closeBtn.setFillStyle(0x2a4a6a));
     closeBtn.on('pointerdown', () => this.closeCountryChart());
     this.chartGroup.add(closeBtn);
     this.chartGroup.add(closeTxt);
 
-    this.chartCard = { x, y, w, h };
+    // Vertical anchors. Country info block sits between title and the
+    // scrollable market table. Scroll body bottom leaves room for legend.
+    const infoTop = y + 46;
+    const marketTop = y + 220;             // info block uses ~170px
+    const marketBottom = y + h - 24;       // 24px for legend at bottom
+
+    this.chartCard = { x, y, w, h, infoTop, marketTop, marketBottom };
     this.chartGfx = this.add.graphics().setDepth(56);
     this.chartGroup.add(this.chartGfx);
     this.chartLabels = [];
+
+    // Wheel scroll for the market table body.
+    this.bindWheelScroll(card, 'countryChart',
+      () => this.computeCountryChartMaxScroll(),
+      () => this.refreshCountryChart());
+  }
+
+  computeCountryChartMaxScroll() {
+    const rowH = 36;
+    const visibleH = this.chartCard.marketBottom - this.chartCard.marketTop - 30; // minus header
+    return Math.max(0, (PRODUCIBLE_LIST?.length ?? 8) * rowH - visibleH);
   }
 
   openCountryChart(countryId) {
     this.chartCountryId = countryId;
     if (!this.state.ui.countryChartOpen) {
-      this.state.ui.savedSpeedIdx = this.state.time.speedIdx;
-      setSpeed(this.state, 0);
+      this.enterModal();
     }
     this.state.ui.countryChartOpen = true;
     this.chartGroup.setVisible(true);
@@ -922,15 +1105,21 @@ export class Game extends Phaser.Scene {
   }
 
   // Lazily build a Visit button on the country-chart card. Re-uses one button across opens.
+  // Positioned in the title bar (right side, left of the close button) so it
+  // doesn't overlap the demographics/economy info block below.
   ensureVisitButton(countryId) {
     if (!this.chartCard) return;
     const { x, y, w } = this.chartCard;
     const labelTxt = `Visit ${COUNTRIES[countryId]?.name ?? countryId} →`;
+    const btnW = 140;
+    const btnH = 24;
+    const btnX = x + w - 36 - btnW - 6;        // 36px close button + 6px gap
+    const btnY = y + 14;
     if (!this.visitBtnBg) {
-      this.visitBtnBg = this.add.rectangle(x + 18, y + 76, w - 36, 28, 0xffb347)
+      this.visitBtnBg = this.add.rectangle(btnX, btnY, btnW, btnH, 0xffb347)
         .setOrigin(0, 0).setInteractive({ useHandCursor: true }).setDepth(57);
-      this.visitTxt = this.add.text(x + w / 2, y + 90, labelTxt, {
-        fontFamily: 'monospace', fontSize: '12px', color: '#0f1923', fontStyle: 'bold',
+      this.visitTxt = this.add.text(btnX + btnW / 2, btnY + btnH / 2, labelTxt, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#0f1923', fontStyle: 'bold',
       }).setOrigin(0.5).setDepth(58);
       this.visitBtnBg.on('pointerover', () => this.visitBtnBg.setFillStyle(0xffc878));
       this.visitBtnBg.on('pointerout', () => this.visitBtnBg.setFillStyle(0xffb347));
@@ -942,13 +1131,15 @@ export class Game extends Phaser.Scene {
       this.chartGroup.add(this.visitBtnBg);
       this.chartGroup.add(this.visitTxt);
     } else {
+      this.visitBtnBg.setPosition(btnX, btnY);
+      this.visitTxt.setPosition(btnX + btnW / 2, btnY + btnH / 2);
       this.visitTxt.setText(labelTxt);
     }
   }
 
   closeCountryChart() {
     if (this.state.ui.countryChartOpen) {
-      setSpeed(this.state, this.state.ui.savedSpeedIdx ?? 1);
+      this.exitModal();
     }
     this.state.ui.countryChartOpen = false;
     this.chartGroup.setVisible(false);
@@ -965,37 +1156,113 @@ export class Game extends Phaser.Scene {
 
     this.chartTitle.setText(reg.name);
     this.chartTitle.setColor(`#${reg.flagColor.toString(16).padStart(6, '0')}`);
-    const wf = Math.round(run.wageFund || 0);
-    const tr = Math.round(run.treasury || 0);
-    const mp = Math.round(run.marketPool || 0);
-    const pi = (run.priceIndex || 1).toFixed(2);
-    const piPct = (((run.priceIndex || 1) - 1) * 100).toFixed(0);
-    const piSign = piPct >= 0 ? '+' : '';
-    const crisis = run.fiscalCrisis?.active ? '  🚨 CRISIS' : '';
-    const trColor = tr < 0 ? '#ff7a7a' : '#cdd6df';
-    this.chartSubtitle.setText(
-      `Pop ${run.population.toFixed(2)}M  ·  Wages $${wf.toLocaleString()}  ·  Treasury $${tr.toLocaleString()}\n` +
-      `Market Pool $${mp.toLocaleString()}  ·  priceIndex ${pi} (${piSign}${piPct}%)${crisis}`,
-    );
-    this.chartSubtitle.setColor(trColor);
     this.ensureVisitButton(countryId);
 
-    // Clear old labels
+    // Clear old labels.
     for (const node of this.chartLabels) node.destroy();
     this.chartLabels = [];
     this.chartGfx.clear();
 
-    const { x, y, w } = this.chartCard;
-    const rows = PRODUCIBLE_LIST;
+    const { x, y, w, infoTop, marketTop, marketBottom } = this.chartCard;
+
+    // ============================================================
+    // INFO BLOCK — country snapshot
+    // ============================================================
+    // Count ventures owned by AI farmers/player in this country.
+    let nIndustryOp = 0, nIndustryIdle = 0, nIndustryClosed = 0, nIndustryBuilding = 0;
+    for (const ind of s.industries || []) {
+      if (ind.countryId !== countryId) continue;
+      if (ind.status === 'operational') nIndustryOp++;
+      else if (ind.status === 'idle') nIndustryIdle++;
+      else if (ind.status === 'closed') nIndustryClosed++;
+      else if (ind.status === 'building') nIndustryBuilding++;
+    }
+    let nMineActive = 0, nMineClosed = 0, nCropActive = 0, nCropFallow = 0;
+    const map = s.maps?.[countryId];
+    if (map) {
+      for (const tile of map.tiles) {
+        if (!tile.crop) continue;
+        if (tile.industryId) continue;
+        if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
+        const def = PRODUCIBLES[tile.crop];
+        if (!def) continue;
+        if (def.category === 'mining') {
+          if (tile.miningStatus === 'closed') nMineClosed++;
+          else nMineActive++;
+        } else if (def.category !== 'processed') {
+          if (tile.state === 'fallow' || tile.state === 'plowed') nCropFallow++;
+          else nCropActive++;
+        }
+      }
+    }
+
+    const wf = Math.round(run.wageFund || 0);
+    const tr = Math.round(run.treasury || 0);
+    const mp = Math.round(run.marketPool || 0);
+    const pi = (run.priceIndex || 1).toFixed(2);
+    const piPct = Math.round(((run.priceIndex || 1) - 1) * 100);
+    const piSign = piPct >= 0 ? '+' : '';
+    const wage = Math.round(wageRateFor(s, countryId));
+    const demand = Math.round(run.laborDemand || 0);
+    const supply = (run.laborSupply || 0).toFixed(1);
+    const tightnessVal = run.laborSupply > 0 ? (run.laborDemand / run.laborSupply) : 0;
+    const tightnessStr = Math.sqrt(Math.max(0, tightnessVal)).toFixed(2);
+    const crisis = run.fiscalCrisis?.active ? '  🚨 CRISIS' : '';
+
+    // Two-column layout for readability.
+    const colA = x + 18, colB = x + w / 2 + 8;
+    const lineH = 14;
+    const ls = (cx, cy, str, color = '#cdd6df', size = '11px') => {
+      const t = this.add.text(cx, cy, str, {
+        fontFamily: 'monospace', fontSize: size, color,
+      }).setDepth(57);
+      this.chartGroup.add(t); this.chartLabels.push(t);
+    };
+
+    // Section header
+    ls(colA, infoTop, '── DEMOGRAPHICS ──', '#7a8694', '10px');
+    ls(colA, infoTop + lineH * 1, `Population: ${Math.round(run.population)} people`);
+    ls(colA, infoTop + lineH * 2, `Labor supply: ${supply}`, '#9aa4ad');
+    ls(colA, infoTop + lineH * 3, `Labor demand: ${demand}`, '#9aa4ad');
+    ls(colA, infoTop + lineH * 4, `Wage: $${wage}/mo·worker  (×${tightnessStr})`,
+       tightnessVal > 1.5 ? '#ff8c8c' : tightnessVal < 0.5 ? '#8cffaa' : '#cdd6df');
+
+    ls(colB, infoTop, '── ECONOMY ──', '#7a8694', '10px');
+    ls(colB, infoTop + lineH * 1, `Wage fund: $${wf.toLocaleString()}`);
+    ls(colB, infoTop + lineH * 2, `Treasury: $${tr.toLocaleString()}${crisis}`,
+       tr < 0 ? '#ff7a7a' : '#cdd6df');
+    ls(colB, infoTop + lineH * 3, `Market pool: $${mp.toLocaleString()}`);
+    ls(colB, infoTop + lineH * 4, `priceIndex: ${pi} (${piSign}${piPct}%)`,
+       Math.abs(piPct) > 30 ? '#ff8c8c' : '#cdd6df');
+
+    // Ventures row
+    const venturesY = infoTop + lineH * 6;
+    ls(colA, venturesY, '── VENTURES ──', '#7a8694', '10px');
+    ls(colA, venturesY + lineH * 1,
+       `🏭 Industries: ${nIndustryOp} op · ${nIndustryIdle} idle · ${nIndustryBuilding} bld · ${nIndustryClosed} closed`);
+    ls(colA, venturesY + lineH * 2,
+       `⛏ Mines: ${nMineActive} active · ${nMineClosed} closed`);
+    ls(colA, venturesY + lineH * 3,
+       `🌾 Crop tiles: ${nCropActive} growing · ${nCropFallow} fallow/plowed`);
+
+    // ============================================================
+    // MARKET TABLE — scrollable
+    // ============================================================
+    const headerY = marketTop;
+    ls(colA, headerY, '── MARKET (trade balance / supply / demand) ──', '#7a8694', '10px');
+    ls(x + w - 200, headerY, '⇧ importing  ⇩ exporting', '#566370', '9px');
+
+    const rowsTop = marketTop + 16;
     const rowH = 36;
-    const startY = y + 116;       // leave room for Visit button
+    const scrollY = (this.scrollState?.countryChart) || 0;
+
+    const rows = PRODUCIBLE_LIST;
     const labelW = 90;
     const valueW = 70;
     const barAreaX = x + 20 + labelW;
     const barAreaW = w - 40 - labelW - valueW;
     const axisX = barAreaX + barAreaW / 2;
 
-    // Find max abs value across producibles to scale bars
     let maxAbs = 1;
     for (const def of rows) {
       const v = Math.abs(run.tradeBalanceEMA?.[def.id] ?? 0);
@@ -1003,34 +1270,29 @@ export class Game extends Phaser.Scene {
     }
 
     rows.forEach((def, i) => {
-      const cy = startY + i * rowH;
+      const cy = rowsTop + i * rowH - scrollY;
       const midY = cy + rowH / 2;
+      // Clip to scroll viewport.
+      if (cy + rowH < rowsTop || cy > marketBottom) return;
 
-      // Producible name
       const nameTxt = this.add.text(x + 20, midY - 5, def.name, {
         fontFamily: 'monospace', fontSize: '11px', color: '#e8edf3',
       }).setOrigin(0, 0.5).setDepth(57);
-      this.chartGroup.add(nameTxt);
-      this.chartLabels.push(nameTxt);
+      this.chartGroup.add(nameTxt); this.chartLabels.push(nameTxt);
 
-      // Per-row supply/demand breakdown beneath the name.
-      // Shows what's currently producing (×scale, delayed) AND today's planting decision
-      // (which will land in production growthDays from now).
       const effProd = effectiveProductionFor(s, countryId, def.id);
       const elasticity = elasticityFor(s, countryId, def.id);
       const target = elasticityTargetFor(s, countryId, def.id);
       const consDaily = run.consumption[def.id] || 0;
       const drift = target > elasticity + 0.05 ? '→' : target < elasticity - 0.05 ? '←' : '·';
       const breakdown =
-        `${effProd.toFixed(1)}p ×${elasticity.toFixed(2)}${drift}planting ${target.toFixed(2)} / ${consDaily.toFixed(1)}c`;
+        `${effProd.toFixed(1)}p ×${elasticity.toFixed(2)}${drift}${target.toFixed(2)} / ${consDaily.toFixed(1)}c`;
       const breakdownTxt = this.add.text(x + 20, midY + 8, breakdown, {
         fontFamily: 'monospace', fontSize: '8px',
         color: elasticity > 1.05 ? '#8cffaa' : elasticity < 0.95 ? '#ff8c8c' : '#7a8694',
       }).setOrigin(0, 0.5).setDepth(57);
-      this.chartGroup.add(breakdownTxt);
-      this.chartLabels.push(breakdownTxt);
+      this.chartGroup.add(breakdownTxt); this.chartLabels.push(breakdownTxt);
 
-      // Bar background (axis line)
       this.chartGfx.lineStyle(1, 0x3a4d63, 1);
       this.chartGfx.lineBetween(barAreaX, midY, barAreaX + barAreaW, midY);
       this.chartGfx.lineStyle(1, 0xcdd6df, 0.7);
@@ -1052,21 +1314,28 @@ export class Game extends Phaser.Scene {
         fontFamily: 'monospace', fontSize: '11px', fontStyle: 'bold',
         color: importing ? '#ff8c8c' : '#8cffaa',
       }).setOrigin(0, 0.5).setDepth(57);
-      this.chartGroup.add(valTxt);
-      this.chartLabels.push(valTxt);
+      this.chartGroup.add(valTxt); this.chartLabels.push(valTxt);
     });
+
+    // Scroll indicator on right edge if there's overflow.
+    const maxScroll = this.computeCountryChartMaxScroll();
+    if (maxScroll > 0) {
+      const trackH = marketBottom - rowsTop;
+      const thumbH = Math.max(20, trackH * (trackH / (trackH + maxScroll)));
+      const thumbY = rowsTop + (scrollY / maxScroll) * (trackH - thumbH);
+      const thumb = this.add.rectangle(x + w - 10, thumbY, 4, thumbH, 0xcdd6df, 0.6)
+        .setOrigin(0, 0).setDepth(57);
+      this.chartGroup.add(thumb); this.chartLabels.push(thumb);
+    }
   }
 
   toggleBank(open) {
     const s = this.state;
     if (open && !s.ui.bankOpen) {
-      // Save current speed and pause the simulation
-      s.ui.savedSpeedIdx = s.time.speedIdx;
-      setSpeed(s, 0);
+      this.enterModal();
       s.tutorial.bankOpened = true;
     } else if (!open && s.ui.bankOpen) {
-      // Restore prior speed
-      setSpeed(s, s.ui.savedSpeedIdx ?? 1);
+      this.exitModal();
     }
     s.ui.bankOpen = open;
     persistTutorial(s);
@@ -1288,6 +1557,10 @@ export class Game extends Phaser.Scene {
     if (this.state.ui.countryChartOpen) this.refreshCountryChart();
     if (this.state.ui.offerOpen) this.refreshOfferModal();
     if (this.state.ui.marketOpen) this.refreshMarketModal();
+    if (this.state.ui.priceChartOpen) this.refreshPriceChartModal();
+    if (this.state.ui.eventsOpen) this.refreshEventsModal();
+    if (this.state.ui.companiesOpen) this.refreshCompaniesModal();
+    if (this.state.ui.worldOpen) this.refreshWorldModal();
     this.refreshTutorial();
   }
 
@@ -1304,9 +1577,12 @@ export class Game extends Phaser.Scene {
     }
     if (events.month) {
       tickIndustrySalaries(this.state); // 8: industries pay salaries
+      tickMiningOps(this.state);        // 8b: mines pay monthly labor → wageFund
+      tickStorageCost(this.state);      // 8c: warehouse labor for held inventory
+      tickLaborMarket(this.state);      // 8d: update country wageRate via EMA
       tickLoans(this.state);            // 9: bank charges
       tickFiscalCrisis(this.state);     // 10: crisis state machine
-      tickAIMonthly(this.state);        // 11: AI close unprofitable industries
+      tickAIMonthly(this.state);        // 11: AI close, reopen, sell inventory
     }
     if (events.year) {
       tickCityYearly(this.state);
@@ -1328,7 +1604,8 @@ export class Game extends Phaser.Scene {
   }
 
   // -----------------------------------------------------------------------
-  // GLOBAL MARKET MODAL — view prices/charts, buy/sell from inventory
+  // MARKET MODAL — view prices/charts per country, buy/sell from inventory.
+  // Country tabs above the table; rows are scrollable so all producibles fit.
   // -----------------------------------------------------------------------
   buildMarketModal() {
     this.marketGroup = this.add.container(0, 0).setVisible(false).setDepth(56);
@@ -1338,19 +1615,15 @@ export class Game extends Phaser.Scene {
     backdrop.on('pointerdown', () => this.toggleMarket(false));
     this.marketGroup.add(backdrop);
 
-    // Modal sized for up to ~10 commodity rows
+    // Fixed-height modal — body scrolls.
     const w = 760;
-    const headerH = 76;
-    const rowH = 44;
-    const padding = 22;
-    const h = Math.min(GAME_HEIGHT - 12,
-      headerH + (PRODUCIBLE_LIST.length * rowH) + padding);
+    const h = Math.min(GAME_HEIGHT - 12, 540);
     const x = (GAME_WIDTH - w) / 2, y = (GAME_HEIGHT - h) / 2;
     const card = this.add.rectangle(x, y, w, h, 0x131e2b)
       .setOrigin(0, 0).setStrokeStyle(2, 0xffb347).setInteractive();
     this.marketGroup.add(card);
 
-    const title = this.add.text(x + 18, y + 14, '📈  GLOBAL MARKET', {
+    const title = this.add.text(x + 18, y + 14, '📈  MARKET', {
       fontFamily: 'monospace', fontSize: '18px', color: '#ffb347', fontStyle: 'bold',
     });
     this.marketGroup.add(title);
@@ -1360,43 +1633,47 @@ export class Game extends Phaser.Scene {
     const closeTxt = this.add.text(x + w - 24, y + 26, '✕', {
       fontFamily: 'monospace', fontSize: '13px', color: '#e8edf3',
     }).setOrigin(0.5);
+    closeBtn.on('pointerover', () => closeBtn.setFillStyle(0x3a6090));
+    closeBtn.on('pointerout', () => closeBtn.setFillStyle(0x2a4a6a));
     closeBtn.on('pointerdown', () => this.toggleMarket(false));
     this.marketGroup.add(closeBtn);
     this.marketGroup.add(closeTxt);
 
-    // Header columns
-    const hy = y + 50;
-    const colHeaders = [
-      { x: x + 18,  text: 'Commodity' },
-      { x: x + 110, text: 'Price' },
-      { x: x + 175, text: 'Trend (90d)' },
-      { x: x + 305, text: 'Stock' },
-      { x: x + 360, text: 'You' },
-      { x: x + 420, text: 'Qty' },
-      { x: x + 540, text: 'Sell' },
-      { x: x + 620, text: 'Buy' },
-    ];
-    for (const c of colHeaders) {
-      const t = this.add.text(c.x, hy, c.text, {
-        fontFamily: 'monospace', fontSize: '10px', color: '#7a8694', fontStyle: 'bold',
-      });
-      this.marketGroup.add(t);
-    }
+    // Vertical layout anchors:
+    //   y+44   country tabs row (28h)
+    //   y+78   header columns (16h)
+    //   y+96   scrollable body
+    //   y+h-8  bottom padding
+    const tabsY = y + 44;
+    const headerY = y + 78;
+    const rowsTop = y + 96;
+    const rowsBottom = y + h - 8;
 
     this.marketSparkGfx = this.add.graphics().setDepth(57);
     this.marketGroup.add(this.marketSparkGfx);
-    this.marketCard = { x, y, w, h, rowsTop: y + headerH };
+    this.marketCard = { x, y, w, h, tabsY, headerY, rowsTop, rowsBottom };
     this.marketDynamicNodes = [];
     if (!this.state.ui.marketQty) this.state.ui.marketQty = {};
+    if (!this.state.ui.marketCountryId) this.state.ui.marketCountryId = PLAYER_COUNTRY_ID;
+
+    // Wheel scroll on the card
+    this.bindWheelScroll(card, 'market',
+      () => this.computeMarketMaxScroll(),
+      () => this.refreshMarketModal());
+  }
+
+  computeMarketMaxScroll() {
+    const rowH = 44;
+    const visibleH = this.marketCard.rowsBottom - this.marketCard.rowsTop;
+    return Math.max(0, PRODUCIBLE_LIST.length * rowH - visibleH);
   }
 
   toggleMarket(open) {
     const s = this.state;
     if (open && !s.ui.marketOpen) {
-      s.ui.savedSpeedIdx = s.time.speedIdx;
-      setSpeed(s, 0);
+      this.enterModal();
     } else if (!open && s.ui.marketOpen) {
-      setSpeed(s, s.ui.savedSpeedIdx ?? 1);
+      this.exitModal();
     }
     s.ui.marketOpen = open;
     this.marketGroup.setVisible(open);
@@ -1404,22 +1681,83 @@ export class Game extends Phaser.Scene {
     this.refreshTopBar();
   }
 
+  // Sum of inventory across all AI farmers in this country for this producible.
+  // Player inventory is shown separately ("You") so we exclude it here.
+  offMarketInventoryFor(state, cid, pid) {
+    let total = 0;
+    for (const ai of state.aiFarmers || []) {
+      if (ai.countryId !== cid) continue;
+      total += ai.inventory?.[pid] || 0;
+    }
+    return Math.round(total);
+  }
+
   refreshMarketModal() {
     const s = this.state;
     if (!s.ui.marketQty) s.ui.marketQty = {};
+    if (!s.ui.marketCountryId) s.ui.marketCountryId = PLAYER_COUNTRY_ID;
+    const cid = s.ui.marketCountryId;
 
     for (const node of this.marketDynamicNodes) node.destroy();
     this.marketDynamicNodes = [];
     this.marketSparkGfx.clear();
 
-    const { x, w, rowsTop } = this.marketCard;
+    const { x, w, tabsY, headerY, rowsTop, rowsBottom } = this.marketCard;
     const rowH = 44;
 
-    PRODUCIBLE_LIST.forEach((def, i) => {
-      const ry = rowsTop + i * rowH;
-      const midY = ry + rowH / 2;
+    // ---- Country tabs ----
+    const tabW = (w - 36) / COUNTRY_IDS.length;
+    COUNTRY_IDS.forEach((tcid, i) => {
+      const tx = x + 18 + i * tabW;
+      const active = tcid === cid;
+      const bg = this.add.rectangle(tx, tabsY, tabW - 4, 24,
+        active ? 0xffb347 : 0x243345).setOrigin(0, 0).setDepth(57)
+        .setInteractive({ useHandCursor: true });
+      const txt = this.add.text(tx + (tabW - 4) / 2, tabsY + 12,
+        COUNTRIES[tcid]?.name ?? tcid, {
+          fontFamily: 'monospace', fontSize: '11px',
+          color: active ? '#0f1923' : '#cdd6df',
+          fontStyle: active ? 'bold' : 'normal',
+        }).setOrigin(0.5).setDepth(58);
+      bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
+      bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
+      bg.on('pointerdown', () => {
+        s.ui.marketCountryId = tcid;
+        if (this.scrollState) this.scrollState.market = 0;
+        this.refreshMarketModal();
+      });
+      this.marketGroup.add(bg); this.marketGroup.add(txt);
+      this.marketDynamicNodes.push(bg, txt);
+    });
 
-      // Color swatch + name
+    // ---- Header columns ----
+    const colHeaders = [
+      { x: x + 18,  text: 'Commodity' },
+      { x: x + 110, text: 'Price' },
+      { x: x + 175, text: 'Trend (90d)' },
+      { x: x + 295, text: 'Mkt' },        // tradeable stock in market
+      { x: x + 340, text: 'Off' },        // hoarded by AIs (off-market)
+      { x: x + 385, text: 'You' },        // player inventory
+      { x: x + 420, text: 'Qty' },
+      { x: x + 540, text: 'Sell' },
+      { x: x + 620, text: 'Buy' },
+    ];
+    for (const c of colHeaders) {
+      const t = this.add.text(c.x, headerY, c.text, {
+        fontFamily: 'monospace', fontSize: '10px', color: '#7a8694', fontStyle: 'bold',
+      }).setDepth(57);
+      this.marketGroup.add(t); this.marketDynamicNodes.push(t);
+    }
+
+    // ---- Scrollable rows ----
+    const scrollY = (this.scrollState?.market) || 0;
+
+    PRODUCIBLE_LIST.forEach((def, i) => {
+      const ry = rowsTop + i * rowH - scrollY;
+      const midY = ry + rowH / 2;
+      // Clip rows outside the visible body.
+      if (ry + rowH < rowsTop || ry > rowsBottom) return;
+
       const swatch = this.add.rectangle(x + 18, midY, 10, 10, def.color).setOrigin(0, 0.5).setDepth(57);
       const nameTxt = this.add.text(x + 34, midY, def.name, {
         fontFamily: 'monospace', fontSize: '12px', color: '#e8edf3', fontStyle: 'bold',
@@ -1427,9 +1765,9 @@ export class Game extends Phaser.Scene {
       this.marketGroup.add(swatch); this.marketGroup.add(nameTxt);
       this.marketDynamicNodes.push(swatch, nameTxt);
 
-      // Price + trend
-      const price = priceOf(s, def.id);
-      const trend = priceTrend(s, def.id, 7);
+      // Price + trend (in selected country)
+      const price = Math.round(s.market.prices?.[cid]?.[def.id] || 0);
+      const trend = priceTrend(s, def.id, cid, 7);
       const priceTxt = this.add.text(x + 110, midY, `$${price}`, {
         fontFamily: 'monospace', fontSize: '13px',
         color: trend > 0.02 ? '#6ee79a' : trend < -0.02 ? '#ff7a7a' : '#e8edf3',
@@ -1438,25 +1776,37 @@ export class Game extends Phaser.Scene {
       this.marketGroup.add(priceTxt);
       this.marketDynamicNodes.push(priceTxt);
 
-      // Sparkline (last 90 days)
+      // Sparkline — only draw when row is visible. Clickable hot-zone opens
+      // the big price chart modal for this producible × country.
       const sparkX = x + 175, sparkY = ry + 8, sparkW = 120, sparkH = rowH - 16;
       this.drawSparkline(this.marketSparkGfx, sparkX, sparkY, sparkW, sparkH,
-        s.market.history?.['home']?.[def.id], trend);
+        s.market.history?.[cid]?.[def.id], trend, def);
+      const sparkHit = this.add.rectangle(sparkX, sparkY, sparkW, sparkH, 0x000000, 0.01)
+        .setOrigin(0, 0).setDepth(58).setInteractive({ useHandCursor: true });
+      sparkHit.on('pointerover', () => sparkHit.setFillStyle(0xffffff, 0.08));
+      sparkHit.on('pointerout', () => sparkHit.setFillStyle(0x000000, 0.01));
+      sparkHit.on('pointerdown', () => this.openPriceChartFor(def.id, cid));
+      this.marketGroup.add(sparkHit);
+      this.marketDynamicNodes.push(sparkHit);
 
-      // Global stock + your inventory (showing home country values)
-      const stock = Math.round(s.market.inventory?.['home']?.[def.id] || 0);
+      const stock = Math.round(s.market.inventory?.[cid]?.[def.id] || 0);
+      const offMkt = this.offMarketInventoryFor(s, cid, def.id);
       const yours = Math.round(inventoryOf(s, 'player', def.id));
-      const stockTxt = this.add.text(x + 305, midY, `${stock}u`, {
+      const stockTxt = this.add.text(x + 295, midY, `${stock}u`, {
         fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
       }).setOrigin(0, 0.5).setDepth(57);
-      const yoursTxt = this.add.text(x + 360, midY, `${yours}u`, {
+      const offTxt = this.add.text(x + 340, midY, `${offMkt}u`, {
+        fontFamily: 'monospace', fontSize: '11px',
+        color: offMkt > 0 ? '#e8a060' : '#566370',
+      }).setOrigin(0, 0.5).setDepth(57);
+      const yoursTxt = this.add.text(x + 385, midY, `${yours}u`, {
         fontFamily: 'monospace', fontSize: '11px',
         color: yours > 0 ? '#ffd166' : '#9aa4ad', fontStyle: yours > 0 ? 'bold' : 'normal',
       }).setOrigin(0, 0.5).setDepth(57);
-      this.marketGroup.add(stockTxt); this.marketGroup.add(yoursTxt);
-      this.marketDynamicNodes.push(stockTxt, yoursTxt);
+      this.marketGroup.add(stockTxt); this.marketGroup.add(offTxt); this.marketGroup.add(yoursTxt);
+      this.marketDynamicNodes.push(stockTxt, offTxt, yoursTxt);
 
-      // Quantity stepper
+      // Qty stepper
       if (s.ui.marketQty[def.id] == null) s.ui.marketQty[def.id] = 1;
       const qty = Math.max(1, s.ui.marketQty[def.id]);
       s.ui.marketQty[def.id] = qty;
@@ -1491,8 +1841,8 @@ export class Game extends Phaser.Scene {
       this.marketGroup.add(qPlus); this.marketGroup.add(qPlusTxt);
       this.marketDynamicNodes.push(qMinus, qMinusTxt, qTxt, qPlus, qPlusTxt);
 
-      // Sell button
-      const sellEnabled = yours >= qty;
+      // Sell — sells into the selected country's market.
+      const sellEnabled = yours >= qty && price > 0;
       const sellBg = this.add.rectangle(x + 540, midY - 13, 70, 26,
         sellEnabled ? 0x2a8a5a : 0x1d2a3a).setOrigin(0, 0).setDepth(57);
       if (sellEnabled) sellBg.setInteractive({ useHandCursor: true });
@@ -1504,13 +1854,9 @@ export class Game extends Phaser.Scene {
         sellBg.on('pointerover', () => sellBg.setFillStyle(0x3aaa6a));
         sellBg.on('pointerout', () => sellBg.setFillStyle(0x2a8a5a));
         sellBg.on('pointerdown', () => {
-          const r = sellFromInventory(s, 'player', def.id, qty);
+          const r = sellFromInventory(s, 'player', def.id, qty, cid);
           if (r.ok) {
-            pushLog(s, `Sold ${r.units}u ${def.name} → $${r.revenue}`);
-            pushFx(s, {
-              type: 'coins', from: 'cash', to: 'cash',
-              count: 4, value: r.revenue, color: 0xffd166,
-            });
+            pushLog(s, `Sold ${r.units}u ${def.name} → $${r.revenue} (${cid})`);
             pushFx(s, { type: 'sfx', kind: 'coin' });
           } else if (r.reason) pushLog(s, r.reason);
           this.refreshMarketModal();
@@ -1520,9 +1866,9 @@ export class Game extends Phaser.Scene {
       this.marketGroup.add(sellBg); this.marketGroup.add(sellTxt);
       this.marketDynamicNodes.push(sellBg, sellTxt);
 
-      // Buy button
+      // Buy
       const buyCost = price * qty;
-      const buyEnabled = stock >= qty && s.player.cash >= buyCost;
+      const buyEnabled = stock >= qty && s.player.cash >= buyCost && price > 0;
       const buyBg = this.add.rectangle(x + 620, midY - 13, 70, 26,
         buyEnabled ? 0x6a4cb2 : 0x1d2a3a).setOrigin(0, 0).setDepth(57);
       if (buyEnabled) buyBg.setInteractive({ useHandCursor: true });
@@ -1534,9 +1880,9 @@ export class Game extends Phaser.Scene {
         buyBg.on('pointerover', () => buyBg.setFillStyle(0x8a6cd2));
         buyBg.on('pointerout', () => buyBg.setFillStyle(0x6a4cb2));
         buyBg.on('pointerdown', () => {
-          const r = buyFromGlobal(s, 'player', def.id, qty);
+          const r = buyFromGlobal(s, 'player', def.id, qty, cid);
           if (r.ok) {
-            pushLog(s, `Bought ${r.units}u ${def.name} → -$${r.cost}`);
+            pushLog(s, `Bought ${r.units}u ${def.name} → -$${r.cost} (${cid})`);
             pushFx(s, { type: 'sfx', kind: 'coinNeg' });
           } else if (r.reason) pushLog(s, r.reason);
           this.refreshMarketModal();
@@ -1546,9 +1892,20 @@ export class Game extends Phaser.Scene {
       this.marketGroup.add(buyBg); this.marketGroup.add(buyTxt);
       this.marketDynamicNodes.push(buyBg, buyTxt);
     });
+
+    // Scroll indicator (right edge)
+    const maxScroll = this.computeMarketMaxScroll();
+    if (maxScroll > 0) {
+      const trackH = rowsBottom - rowsTop;
+      const thumbH = Math.max(20, trackH * (trackH / (trackH + maxScroll)));
+      const thumbY = rowsTop + (scrollY / maxScroll) * (trackH - thumbH);
+      const thumb = this.add.rectangle(x + w - 10, thumbY, 4, thumbH, 0xffb347, 0.6)
+        .setOrigin(0, 0).setDepth(58);
+      this.marketGroup.add(thumb); this.marketDynamicNodes.push(thumb);
+    }
   }
 
-  drawSparkline(gfx, x, y, w, h, history, trend) {
+  drawSparkline(gfx, x, y, w, h, history, trend, def = null) {
     if (!history || history.length < 2) return;
     const samples = history.slice(-90);
     const min = Math.min(...samples);
@@ -1564,8 +1921,7 @@ export class Game extends Phaser.Scene {
       else gfx.lineTo(px, py);
     }
     gfx.strokePath();
-    // Dotted baseline at the basePrice (visual reference)
-    const def = PRODUCIBLE_LIST.find(p => history === this.state.market.history?.['home']?.[p.id]);
+    // Dotted baseline at basePrice when caller provided the def.
     if (def) {
       const base = def.market?.basePrice ?? min;
       if (base >= min && base <= max) {
@@ -1574,6 +1930,724 @@ export class Game extends Phaser.Scene {
         for (let dx = 0; dx < w; dx += 4) gfx.lineBetween(x + dx, by, x + dx + 2, by);
       }
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // MODAL FRAME HELPER + GENERIC SCROLL LIST
+  // -----------------------------------------------------------------------
+  // Creates a centered modal card with a title bar and an [X] close button.
+  // Backdrop click + the close button both call `onClose`. Returns the frame
+  // metadata for the caller to populate the body region.
+  makeModalFrame({ w, h, title, color, onClose, depth = 56 }) {
+    const group = this.add.container(0, 0).setVisible(false).setDepth(depth);
+    const backdrop = this.add.rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.7)
+      .setOrigin(0, 0).setInteractive();
+    backdrop.on('pointerdown', onClose);
+    group.add(backdrop);
+
+    const x = (GAME_WIDTH - w) / 2;
+    const y = (GAME_HEIGHT - h) / 2;
+    const card = this.add.rectangle(x, y, w, h, 0x131e2b)
+      .setOrigin(0, 0).setStrokeStyle(2, color).setInteractive();
+    group.add(card);
+
+    const titleTxt = this.add.text(x + 18, y + 14, title, {
+      fontFamily: 'monospace', fontSize: '16px', color: '#e8edf3', fontStyle: 'bold',
+    });
+    titleTxt.setColor('#' + color.toString(16).padStart(6, '0'));
+    group.add(titleTxt);
+
+    const closeBg = this.add.rectangle(x + w - 36, y + 14, 24, 24, 0x2a4a6a)
+      .setOrigin(0, 0).setInteractive({ useHandCursor: true });
+    const closeTxt = this.add.text(x + w - 24, y + 26, '✕', {
+      fontFamily: 'monospace', fontSize: '13px', color: '#e8edf3',
+    }).setOrigin(0.5);
+    closeBg.on('pointerover', () => closeBg.setFillStyle(0x3a6090));
+    closeBg.on('pointerout', () => closeBg.setFillStyle(0x2a4a6a));
+    closeBg.on('pointerdown', onClose);
+    group.add(closeBg); group.add(closeTxt);
+
+    return { group, x, y, w, h, contentTop: y + 50, contentBottom: y + h - 12 };
+  }
+
+  // Manage scroll state for a modal. Wheel events on the card area scroll the
+  // body. State is stored on `this.scrollState[key]`.
+  bindWheelScroll(card, key, getMaxScroll, onScroll) {
+    if (!this.scrollState) this.scrollState = {};
+    if (this.scrollState[key] == null) this.scrollState[key] = 0;
+    card.on('wheel', (_pointer, _dx, dy) => {
+      const max = getMaxScroll();
+      this.scrollState[key] = Math.max(0, Math.min(max, this.scrollState[key] + dy));
+      onScroll();
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // PRICE CHART MODAL — full-size historical price chart with date filter
+  // -----------------------------------------------------------------------
+  buildPriceChartModal() {
+    const frame = this.makeModalFrame({
+      w: 720, h: 500, title: '📊  PRICE CHART', color: 0xffb347,
+      onClose: () => this.togglePriceChart(false),
+      depth: 62,                                  // above Market modal
+    });
+    this.priceChartFrame = frame;
+    this.priceChartGfx = this.add.graphics().setDepth(63);
+    frame.group.add(this.priceChartGfx);
+    this.priceChartDynamic = [];
+  }
+
+  // Called from the Market modal sparkline. Locks producible+country and opens
+  // the chart. Doesn't close the Market modal — uses higher depth so it overlays.
+  openPriceChartFor(pid, cid) {
+    const s = this.state;
+    s.ui.priceChartPid = pid;
+    s.ui.priceChartCid = cid;
+    if (!s.ui.priceChartDays) s.ui.priceChartDays = 90;     // default: 3 months
+    this.togglePriceChart(true);
+  }
+
+  togglePriceChart(open) {
+    const s = this.state;
+    if (open && !s.ui.priceChartOpen) this.enterModal();
+    else if (!open && s.ui.priceChartOpen) this.exitModal();
+    s.ui.priceChartOpen = open;
+    this.priceChartFrame.group.setVisible(open);
+    if (open) this.refreshPriceChartModal();
+    this.refreshTopBar();
+  }
+
+  refreshPriceChartModal() {
+    const s = this.state;
+    const pid = s.ui.priceChartPid;
+    const cid = s.ui.priceChartCid;
+    if (!pid || !cid) return;
+    const def = PRODUCIBLES[pid];
+    if (!def) return;
+    const history = s.market.history?.[cid]?.[pid] || [];
+
+    for (const n of this.priceChartDynamic) n.destroy();
+    this.priceChartDynamic = [];
+    this.priceChartGfx.clear();
+
+    const { x, y, w, h, contentTop, contentBottom } = this.priceChartFrame;
+
+    // Update title text to include producible + country.
+    this.priceChartFrame.group.list[2].setText(
+      `📊  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`,
+    );
+
+    // ---- Date filter pills ----
+    const days = s.ui.priceChartDays || 90;
+    const ranges = [
+      { label: '1M',  days: 30 },
+      { label: '3M',  days: 90 },
+      { label: '6M',  days: 180 },
+      { label: '1Y',  days: 365 },
+      { label: 'All', days: Infinity },
+    ];
+    const pillsY = contentTop;
+    let pillX = x + 18;
+    for (const r of ranges) {
+      const active = days === r.days;
+      const bg = this.add.rectangle(pillX, pillsY, 50, 22,
+        active ? 0xffb347 : 0x243345).setOrigin(0, 0).setDepth(63)
+        .setInteractive({ useHandCursor: true });
+      const txt = this.add.text(pillX + 25, pillsY + 11, r.label, {
+        fontFamily: 'monospace', fontSize: '11px',
+        color: active ? '#0f1923' : '#cdd6df',
+        fontStyle: active ? 'bold' : 'normal',
+      }).setOrigin(0.5).setDepth(64);
+      bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
+      bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
+      bg.on('pointerdown', () => {
+        s.ui.priceChartDays = r.days;
+        this.refreshPriceChartModal();
+      });
+      this.priceChartFrame.group.add(bg); this.priceChartFrame.group.add(txt);
+      this.priceChartDynamic.push(bg, txt);
+      pillX += 56;
+    }
+
+    // ---- Window of samples ----
+    const samples = days === Infinity ? history.slice() : history.slice(-days);
+    if (samples.length < 2) {
+      const empty = this.add.text(x + w / 2, (contentTop + contentBottom) / 2,
+        'Not enough history yet — let some days pass.', {
+        fontFamily: 'monospace', fontSize: '12px', color: '#7a8694',
+      }).setOrigin(0.5).setDepth(63);
+      this.priceChartFrame.group.add(empty); this.priceChartDynamic.push(empty);
+      return;
+    }
+
+    // Stats
+    const minV = Math.min(...samples);
+    const maxV = Math.max(...samples);
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const pct = first > 0 ? ((last - first) / first) * 100 : 0;
+    const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+    const pctColor = pct > 1 ? '#6ee79a' : pct < -1 ? '#ff7a7a' : '#cdd6df';
+
+    const statsY = pillsY + 30;
+    const statsTxt = this.add.text(x + 18, statsY,
+      `Current $${last.toFixed(2)}   ·   Window min $${minV.toFixed(2)}   ·   max $${maxV.toFixed(2)}   ·   ${samples.length}d`, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
+      }).setDepth(63);
+    this.priceChartFrame.group.add(statsTxt); this.priceChartDynamic.push(statsTxt);
+
+    const pctTxt = this.add.text(x + w - 18, statsY, `Δ ${pctStr}`, {
+      fontFamily: 'monospace', fontSize: '13px', color: pctColor, fontStyle: 'bold',
+    }).setOrigin(1, 0).setDepth(63);
+    this.priceChartFrame.group.add(pctTxt); this.priceChartDynamic.push(pctTxt);
+
+    // ---- Plot area ----
+    const plotLeft = x + 60;
+    const plotRight = x + w - 24;
+    const plotTop = statsY + 28;
+    const plotBottom = contentBottom - 24;
+    const plotW = plotRight - plotLeft;
+    const plotH = plotBottom - plotTop;
+
+    // Y axis grid: 4 horizontal lines
+    const range = (maxV - minV) || 1;
+    const yPad = range * 0.08;
+    const yMin = Math.max(0, minV - yPad);
+    const yMax = maxV + yPad;
+    const yRange = (yMax - yMin) || 1;
+    for (let g = 0; g <= 4; g++) {
+      const yVal = yMin + (yRange * g) / 4;
+      const py = plotBottom - ((yVal - yMin) / yRange) * plotH;
+      this.priceChartGfx.lineStyle(1, 0x3a4d63, 0.5);
+      this.priceChartGfx.lineBetween(plotLeft, py, plotRight, py);
+      const lab = this.add.text(plotLeft - 6, py, `$${yVal.toFixed(0)}`, {
+        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
+      }).setOrigin(1, 0.5).setDepth(63);
+      this.priceChartFrame.group.add(lab); this.priceChartDynamic.push(lab);
+    }
+
+    // X axis: start / end day labels
+    const daysSpan = samples.length - 1;
+    const totalDays = s.time.totalDays;
+    const startDay = totalDays - daysSpan;
+    const xStartLab = this.add.text(plotLeft, plotBottom + 6,
+      `day ${startDay}`, {
+        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
+      }).setDepth(63);
+    const xEndLab = this.add.text(plotRight, plotBottom + 6,
+      `day ${totalDays}`, {
+        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
+      }).setOrigin(1, 0).setDepth(63);
+    this.priceChartFrame.group.add(xStartLab); this.priceChartFrame.group.add(xEndLab);
+    this.priceChartDynamic.push(xStartLab, xEndLab);
+
+    // basePrice dashed reference line
+    const base = def.market?.basePrice ?? 0;
+    if (base >= yMin && base <= yMax) {
+      const by = plotBottom - ((base - yMin) / yRange) * plotH;
+      this.priceChartGfx.lineStyle(1, 0x566370, 0.7);
+      for (let dx = 0; dx < plotW; dx += 6) {
+        this.priceChartGfx.lineBetween(plotLeft + dx, by, plotLeft + dx + 3, by);
+      }
+      const baseLab = this.add.text(plotRight + 2, by, `base $${base}`, {
+        fontFamily: 'monospace', fontSize: '8px', color: '#566370',
+      }).setOrigin(0, 0.5).setDepth(63);
+      this.priceChartFrame.group.add(baseLab); this.priceChartDynamic.push(baseLab);
+    }
+
+    // Main line — use producible color
+    this.priceChartGfx.lineStyle(2, def.color, 1);
+    this.priceChartGfx.beginPath();
+    for (let i = 0; i < samples.length; i++) {
+      const px = plotLeft + (i / (samples.length - 1)) * plotW;
+      const py = plotBottom - ((samples[i] - yMin) / yRange) * plotH;
+      if (i === 0) this.priceChartGfx.moveTo(px, py);
+      else this.priceChartGfx.lineTo(px, py);
+    }
+    this.priceChartGfx.strokePath();
+
+    // Min / max markers (small dots)
+    const markIdx = (target) => {
+      let bestI = 0;
+      for (let i = 1; i < samples.length; i++) {
+        if ((target === 'min' && samples[i] < samples[bestI])
+            || (target === 'max' && samples[i] > samples[bestI])) bestI = i;
+      }
+      return bestI;
+    };
+    for (const which of ['min', 'max']) {
+      const i = markIdx(which);
+      const px = plotLeft + (i / (samples.length - 1)) * plotW;
+      const py = plotBottom - ((samples[i] - yMin) / yRange) * plotH;
+      const color = which === 'min' ? 0xff7a7a : 0x6ee79a;
+      this.priceChartGfx.fillStyle(color, 1);
+      this.priceChartGfx.fillCircle(px, py, 3);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // EVENTS MODAL — scrollable history of all past events
+  // -----------------------------------------------------------------------
+  buildEventsModal() {
+    const frame = this.makeModalFrame({
+      w: 620, h: 480, title: '⚡  EVENTS HISTORY', color: 0xf7c948,
+      onClose: () => this.toggleEvents(false),
+    });
+    this.eventsFrame = frame;
+    this.eventsDynamicNodes = [];
+
+    // Scroll-bind on the card
+    const card = frame.group.list[1]; // backdrop=0, card=1
+    this.bindWheelScroll(card, 'events',
+      () => this.computeEventsMaxScroll(),
+      () => this.refreshEventsModal());
+  }
+
+  computeEventsMaxScroll() {
+    const rows = (this.state.eventHistory?.length || 0) + (this.state.activeEvents?.length || 0);
+    const rowH = 30;
+    const visibleH = this.eventsFrame.contentBottom - this.eventsFrame.contentTop - 30;
+    return Math.max(0, rows * rowH - visibleH);
+  }
+
+  toggleEvents(open) {
+    const s = this.state;
+    if (open && !s.ui.eventsOpen) this.enterModal();
+    else if (!open && s.ui.eventsOpen) this.exitModal();
+    s.ui.eventsOpen = open;
+    this.eventsFrame.group.setVisible(open);
+    if (open) this.refreshEventsModal();
+    this.refreshTopBar();
+  }
+
+  refreshEventsModal() {
+    const s = this.state;
+    for (const n of this.eventsDynamicNodes) n.destroy();
+    this.eventsDynamicNodes = [];
+
+    const { x, w, contentTop, contentBottom } = this.eventsFrame;
+    const subY = contentTop;
+    const sub = this.add.text(x + 18, subY,
+      `${(s.eventHistory?.length || 0)} past · ${(s.activeEvents?.length || 0)} active`, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
+      });
+    this.eventsFrame.group.add(sub); this.eventsDynamicNodes.push(sub);
+
+    const rowsTop = subY + 24;
+    const rowH = 30;
+    const visibleH = contentBottom - rowsTop;
+    const scrollY = (this.scrollState?.events) || 0;
+
+    // Combined row list — active first, then history reversed (newest first).
+    const rows = [];
+    for (const e of (s.activeEvents || [])) {
+      const def = EVENT_TYPES[e.type];
+      rows.push({
+        active: true,
+        label: def?.label ?? e.type,
+        appliedDay: e.appliedDay,
+        endedDay: null,
+        country: def?.params?.country ?? null,
+        daysRemaining: e.daysRemaining,
+      });
+    }
+    for (let i = (s.eventHistory?.length || 0) - 1; i >= 0; i--) rows.push(s.eventHistory[i]);
+
+    rows.forEach((row, i) => {
+      const ry = rowsTop + i * rowH - scrollY;
+      if (ry + rowH < rowsTop || ry > contentBottom) return; // clip
+
+      const bg = this.add.rectangle(x + 14, ry + 2, w - 28, rowH - 4,
+        row.active ? 0x2a3a4a : 0x1a2434).setOrigin(0, 0).setDepth(57);
+      this.eventsFrame.group.add(bg); this.eventsDynamicNodes.push(bg);
+
+      const dot = this.add.circle(x + 26, ry + rowH / 2, 4,
+        row.active ? 0xf7c948 : 0x566370).setDepth(58);
+      this.eventsFrame.group.add(dot); this.eventsDynamicNodes.push(dot);
+
+      const label = `${row.label}${row.country ? ` (${row.country})` : ''}`;
+      const labelTxt = this.add.text(x + 36, ry + 5, label, {
+        fontFamily: 'monospace', fontSize: '12px',
+        color: row.active ? '#f7c948' : '#cdd6df', fontStyle: row.active ? 'bold' : 'normal',
+      }).setDepth(58);
+      this.eventsFrame.group.add(labelTxt); this.eventsDynamicNodes.push(labelTxt);
+
+      const meta = row.active
+        ? `active · ${row.daysRemaining}d left`
+        : `day ${row.appliedDay ?? '?'} → ${row.endedDay}`;
+      const metaTxt = this.add.text(x + w - 22, ry + 8, meta, {
+        fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
+      }).setOrigin(1, 0).setDepth(58);
+      this.eventsFrame.group.add(metaTxt); this.eventsDynamicNodes.push(metaTxt);
+    });
+
+    if (rows.length === 0) {
+      const empty = this.add.text(x + w / 2, rowsTop + visibleH / 2, 'No events yet', {
+        fontFamily: 'monospace', fontSize: '12px', color: '#566370',
+      }).setOrigin(0.5);
+      this.eventsFrame.group.add(empty); this.eventsDynamicNodes.push(empty);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // COMPANIES MODAL — all companies (player + AI), debt, cash, industries
+  // -----------------------------------------------------------------------
+  buildCompaniesModal() {
+    const frame = this.makeModalFrame({
+      w: 720, h: 500, title: '🏭  COMPANIES', color: 0xc792ea,
+      onClose: () => this.toggleCompanies(false),
+    });
+    this.companiesFrame = frame;
+    this.companiesDynamicNodes = [];
+    const card = frame.group.list[1];
+    this.bindWheelScroll(card, 'companies',
+      () => this.computeCompaniesMaxScroll(),
+      () => this.refreshCompaniesModal());
+  }
+
+  computeCompaniesMaxScroll() {
+    const n = 1 + (this.state.aiFarmers?.length || 0);
+    const rowH = 78;                              // bumped to fit the inventory line
+    const visibleH = this.companiesFrame.contentBottom - this.companiesFrame.contentTop - 30;
+    return Math.max(0, n * rowH - visibleH);
+  }
+
+  toggleCompanies(open) {
+    const s = this.state;
+    if (open && !s.ui.companiesOpen) this.enterModal();
+    else if (!open && s.ui.companiesOpen) this.exitModal();
+    s.ui.companiesOpen = open;
+    this.companiesFrame.group.setVisible(open);
+    if (open) this.refreshCompaniesModal();
+    this.refreshTopBar();
+  }
+
+  refreshCompaniesModal() {
+    const s = this.state;
+    for (const n of this.companiesDynamicNodes) n.destroy();
+    this.companiesDynamicNodes = [];
+
+    const { x, w, contentTop, contentBottom } = this.companiesFrame;
+    const sub = this.add.text(x + 18, contentTop,
+      `${1 + (s.aiFarmers?.length || 0)} companies · click to inspect`, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
+      });
+    this.companiesFrame.group.add(sub); this.companiesDynamicNodes.push(sub);
+
+    const rowsTop = contentTop + 26;
+    const rowH = 78;
+    const scrollY = (this.scrollState?.companies) || 0;
+
+    // Build company list: player first, then AIs. Capture inventory reference
+    // so we can render it inline (stock the company is HOLDING, not selling).
+    const all = [
+      { id: 'player', name: 'YOU (Player)', cash: s.player.cash,
+        countryId: PLAYER_COUNTRY_ID, isPlayer: true, inventory: s.player.inventory },
+      ...(s.aiFarmers || []).map(a => ({
+        id: a.id, name: a.name, cash: a.cash,
+        countryId: a.countryId, isPlayer: false, color: a.color,
+        inventory: a.inventory,
+      })),
+    ];
+
+    all.forEach((co, i) => {
+      const ry = rowsTop + i * rowH - scrollY;
+      if (ry + rowH < rowsTop || ry > contentBottom) return;
+
+      const bg = this.add.rectangle(x + 14, ry + 2, w - 28, rowH - 4,
+        co.isPlayer ? 0x2a3548 : 0x1a2434).setOrigin(0, 0)
+        .setStrokeStyle(co.isPlayer ? 1 : 0, 0xc792ea).setDepth(57);
+      this.companiesFrame.group.add(bg); this.companiesDynamicNodes.push(bg);
+
+      // Color dot
+      const dotColor = co.isPlayer ? 0xffd166 : (co.color ?? 0xc792ea);
+      const dot = this.add.rectangle(x + 22, ry + 8, 8, 8, dotColor).setOrigin(0, 0).setDepth(58);
+      this.companiesFrame.group.add(dot); this.companiesDynamicNodes.push(dot);
+
+      // Name + country
+      const head = `${co.name}  ·  ${COUNTRIES[co.countryId]?.name ?? co.countryId}`;
+      const headTxt = this.add.text(x + 38, ry + 4, head, {
+        fontFamily: 'monospace', fontSize: '12px', color: '#e8edf3', fontStyle: 'bold',
+      }).setDepth(58);
+      this.companiesFrame.group.add(headTxt); this.companiesDynamicNodes.push(headTxt);
+
+      // Stats line
+      const debt = totalDebt(s, co.id);
+      const ownedTiles = co.isPlayer
+        ? Object.values(s.maps).reduce((n, m) => n + m.tiles.filter(t => t.owner === 'player').length, 0)
+        : (s.aiFarmers.find(a => a.id === co.id)?.ownedTileIds?.length || 0);
+      const myInds = (s.industries || []).filter(ind => ind.ownerId === co.id);
+      const operational = myInds.filter(ind => ind.status === 'operational').length;
+      const idle = myInds.filter(ind => ind.status === 'idle').length;
+      const closed = myInds.filter(ind => ind.status === 'closed').length;
+      const building = myInds.filter(ind => ind.status === 'building').length;
+
+      const stats = `💰 $${Math.round(co.cash)}    🏦 $${Math.round(debt)}    🌾 ${ownedTiles} tiles    🏭 ${operational} op / ${idle} idle / ${building} bld / ${closed} closed`;
+      const statsTxt = this.add.text(x + 22, ry + 22, stats, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
+      }).setDepth(58);
+      this.companiesFrame.group.add(statsTxt); this.companiesDynamicNodes.push(statsTxt);
+
+      // Industry list
+      if (myInds.length > 0) {
+        const indNames = myInds.slice(0, 4).map(ind => {
+          const recipe = INDUSTRIES[ind.recipeId];
+          const tag = ind.status === 'operational' ? '✓' : ind.status === 'closed' ? '✕' : ind.status === 'building' ? '🛠' : '·';
+          return `${tag}${recipe?.name ?? ind.recipeId}`;
+        }).join('  ');
+        const more = myInds.length > 4 ? `  +${myInds.length - 4}` : '';
+        const indTxt = this.add.text(x + 22, ry + 40, indNames + more, {
+          fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
+        }).setDepth(58);
+        this.companiesFrame.group.add(indTxt); this.companiesDynamicNodes.push(indTxt);
+      }
+
+      // Inventory line — what this company is HOLDING (off-market). Empty
+      // entries omitted; shows up to 6 of the biggest stockpiles.
+      const inv = co.inventory || {};
+      const entries = Object.entries(inv)
+        .filter(([, qty]) => qty > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6);
+      if (entries.length > 0) {
+        const invStr = '📦 ' + entries.map(([pid, qty]) => {
+          const d = PRODUCIBLES[pid];
+          return `${d?.name?.slice(0, 6) ?? pid} ${Math.round(qty)}u`;
+        }).join(', ');
+        const invTxt = this.add.text(x + 22, ry + 58, invStr, {
+          fontFamily: 'monospace', fontSize: '10px', color: '#e8a060',
+        }).setDepth(58);
+        this.companiesFrame.group.add(invTxt); this.companiesDynamicNodes.push(invTxt);
+      } else {
+        const noInv = this.add.text(x + 22, ry + 58, '📦 (no inventory)', {
+          fontFamily: 'monospace', fontSize: '10px', color: '#566370',
+        }).setDepth(58);
+        this.companiesFrame.group.add(noInv); this.companiesDynamicNodes.push(noInv);
+      }
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // WORLD MODAL — country graph (population/distance/trade volume)
+  // -----------------------------------------------------------------------
+  buildWorldModal() {
+    const frame = this.makeModalFrame({
+      w: 700, h: 540, title: '🌍  WORLD', color: 0x60b3ff,
+      onClose: () => this.toggleWorld(false),
+    });
+    this.worldFrame = frame;
+    this.worldDynamicNodes = [];
+    this.worldGfx = this.add.graphics().setDepth(57);
+    frame.group.add(this.worldGfx);
+  }
+
+  toggleWorld(open) {
+    const s = this.state;
+    if (open && !s.ui.worldOpen) this.enterModal();
+    else if (!open && s.ui.worldOpen) this.exitModal();
+    s.ui.worldOpen = open;
+    this.worldFrame.group.setVisible(open);
+    if (open) this.refreshWorldModal();
+    this.refreshTopBar();
+  }
+
+  // Draw an arrow from (x1,y1) to (x2,y2). Stops short of the destination so
+  // the arrowhead is visible against the destination node.
+  drawArrow(gfx, x1, y1, x2, y2, color, opacity, thickness, headLen = 10, headStop = 0) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1) return;
+    const nx = dx / len, ny = dy / len;
+    const ex = x2 - nx * headStop, ey = y2 - ny * headStop;
+    gfx.lineStyle(thickness, color, opacity);
+    gfx.lineBetween(x1, y1, ex, ey);
+    // Arrowhead — filled triangle
+    const baseX = ex - nx * headLen, baseY = ey - ny * headLen;
+    const px = -ny, py = nx; // perpendicular
+    const wHead = Math.max(4, headLen * 0.5);
+    gfx.fillStyle(color, opacity);
+    gfx.beginPath();
+    gfx.moveTo(ex, ey);
+    gfx.lineTo(baseX + px * wHead, baseY + py * wHead);
+    gfx.lineTo(baseX - px * wHead, baseY - py * wHead);
+    gfx.closePath();
+    gfx.fillPath();
+  }
+
+  refreshWorldModal() {
+    const s = this.state;
+    for (const n of this.worldDynamicNodes) n.destroy();
+    this.worldDynamicNodes = [];
+    this.worldGfx.clear();
+
+    const { x, y, w, h, contentTop, contentBottom } = this.worldFrame;
+    if (!s.ui.worldSelectedPid) s.ui.worldSelectedPid = null;            // null = total
+    if (!s.ui.worldFlowDays) s.ui.worldFlowDays = 30;
+    const selectedPid = s.ui.worldSelectedPid;
+    const days = s.ui.worldFlowDays;
+
+    // ---- Producible chip selector at top ----
+    const chipsTop = contentTop;
+    const chipW = 56, chipH = 22, chipGap = 4;
+    const totalChips = 1 + PRODUCIBLE_LIST.length;          // "Total" + each producible
+    const chipsPerRow = Math.floor((w - 36) / (chipW + chipGap));
+    const rowsCount = Math.ceil(totalChips / chipsPerRow);
+    const chipsAreaH = rowsCount * (chipH + chipGap);
+
+    const placeChip = (i, label, color, swatch, isActive, onClick) => {
+      const row = Math.floor(i / chipsPerRow);
+      const col = i % chipsPerRow;
+      const cx = x + 18 + col * (chipW + chipGap);
+      const cy = chipsTop + row * (chipH + chipGap);
+      const bg = this.add.rectangle(cx, cy, chipW, chipH,
+        isActive ? color : 0x243345).setOrigin(0, 0).setDepth(57)
+        .setInteractive({ useHandCursor: true });
+      const txt = this.add.text(cx + chipW / 2, cy + chipH / 2, label, {
+        fontFamily: 'monospace', fontSize: '9px',
+        color: isActive ? '#0f1923' : '#cdd6df',
+        fontStyle: isActive ? 'bold' : 'normal',
+      }).setOrigin(0.5).setDepth(58);
+      if (swatch != null) {
+        const dot = this.add.rectangle(cx + 4, cy + chipH / 2, 6, 6, swatch).setOrigin(0, 0.5).setDepth(58);
+        this.worldFrame.group.add(dot); this.worldDynamicNodes.push(dot);
+      }
+      bg.on('pointerover', () => { if (!isActive) bg.setFillStyle(0x3a4d63); });
+      bg.on('pointerout', () => { if (!isActive) bg.setFillStyle(0x243345); });
+      bg.on('pointerdown', onClick);
+      this.worldFrame.group.add(bg); this.worldFrame.group.add(txt);
+      this.worldDynamicNodes.push(bg, txt);
+    };
+
+    placeChip(0, 'Total', 0x60b3ff, null, selectedPid === null, () => {
+      s.ui.worldSelectedPid = null; this.refreshWorldModal();
+    });
+    PRODUCIBLE_LIST.forEach((def, i) => {
+      placeChip(i + 1, def.name.slice(0, 7), def.color, def.color,
+        selectedPid === def.id,
+        () => { s.ui.worldSelectedPid = def.id; this.refreshWorldModal(); });
+    });
+
+    // ---- Country graph layout ----
+    const graphTop = chipsTop + chipsAreaH + 8;
+    const graphBottom = contentBottom - 24;
+    const cx = x + w / 2;
+    const cyCenter = (graphTop + graphBottom) / 2;
+    const radius = Math.min(w * 0.42, (graphBottom - graphTop) * 0.42);
+
+    const others = COUNTRY_IDS.filter(c => c !== PLAYER_COUNTRY_ID);
+    const positions = { [PLAYER_COUNTRY_ID]: { x: cx, y: cyCenter } };
+    others.forEach((cid, i) => {
+      const angle = (i / others.length) * Math.PI * 2 - Math.PI / 2;
+      positions[cid] = { x: cx + Math.cos(angle) * radius, y: cyCenter + Math.sin(angle) * radius };
+    });
+
+    // ---- Compute net flows per pair for thickness scaling ----
+    // For each unordered pair {a,b}, compute volA→B and volB→A over `days`,
+    // then the NET flow (positive = A exports to B). The arrow points from
+    // exporter to importer with thickness ∝ |net|.
+    const pairs = [];
+    let maxVol = 0;
+    const seen = new Set();
+    for (const a of COUNTRY_IDS) {
+      for (const b of COUNTRY_IDS) {
+        if (a === b) continue;
+        const key = [a, b].sort().join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const aToB = tradeFlowVolume(s, a, b, selectedPid, days);
+        const bToA = tradeFlowVolume(s, b, a, selectedPid, days);
+        const net = aToB - bToA;
+        const total = aToB + bToA;
+        if (total > maxVol) maxVol = total;
+        pairs.push({ a, b, aToB, bToA, net, total });
+      }
+    }
+
+    // ---- Draw edges (arrows or dim lines) ----
+    const nodeRadiusOf = {};   // we'll compute below; precomputed to stop arrow short
+    const allPop = COUNTRY_IDS.map(c => s.countries[c]?.population || 0);
+    const maxPop = Math.max(...allPop, 1);
+    for (const cid of COUNTRY_IDS) {
+      const pop = s.countries[cid]?.population || 0;
+      nodeRadiusOf[cid] = 12 + (pop / maxPop) * 30;
+    }
+
+    for (const p of pairs) {
+      const pa = positions[p.a], pb = positions[p.b];
+      const dist = DISTANCES[p.a]?.[p.b] ?? 0;
+
+      if (p.total <= 0) {
+        // No flow recorded — show a dim line so the topology is still visible.
+        this.worldGfx.lineStyle(1, 0x3a4d63, 0.4);
+        this.worldGfx.lineBetween(pa.x, pa.y, pb.x, pb.y);
+      } else {
+        // Arrow goes from exporter to importer. If net is 0 (same in both
+        // directions), draw a thin neutral line.
+        const exporter = p.net >= 0 ? p.a : p.b;
+        const importer = p.net >= 0 ? p.b : p.a;
+        const ex = positions[exporter], im = positions[importer];
+        const thickness = Math.max(1.2, Math.min(8, (Math.abs(p.net) / Math.max(1, maxVol)) * 7 + 1));
+        const opacity = Math.max(0.4, Math.min(1, Math.abs(p.net) / Math.max(1, maxVol)));
+        this.drawArrow(this.worldGfx, ex.x, ex.y, im.x, im.y,
+          0x88c8ff, opacity, thickness, 11, nodeRadiusOf[importer] + 3);
+      }
+
+      // Distance + flow label near midpoint
+      const mx = (pa.x + pb.x) / 2;
+      const my = (pa.y + pb.y) / 2;
+      const lblText = p.total > 0
+        ? `${dist}d · ${Math.round(p.aToB)}↔${Math.round(p.bToA)}`
+        : `${dist}d`;
+      const distTxt = this.add.text(mx, my, lblText, {
+        fontFamily: 'monospace', fontSize: '9px',
+        color: p.total > 0 ? '#88c8ff' : '#566370',
+        backgroundColor: '#0f1923',
+      }).setOrigin(0.5).setDepth(58).setPadding(2, 1, 2, 1);
+      this.worldFrame.group.add(distTxt); this.worldDynamicNodes.push(distTxt);
+    }
+
+    // ---- Nodes ----
+    for (const cid of COUNTRY_IDS) {
+      const pos = positions[cid];
+      const country = s.countries[cid];
+      const reg = COUNTRIES[cid];
+      const pop = country?.population || 0;
+      const r = nodeRadiusOf[cid];
+
+      const isHome = cid === PLAYER_COUNTRY_ID;
+      const isHere = cid === s.ui.currentMap;
+      const fill = isHome ? 0xffd166 : (isHere ? 0x6ee7b7 : 0x60b3ff);
+
+      const circle = this.add.circle(pos.x, pos.y, r, fill, 0.85)
+        .setDepth(59).setStrokeStyle(2, 0x131e2b)
+        .setInteractive({ useHandCursor: true });
+      circle.on('pointerover', () => circle.setStrokeStyle(2, 0xe8edf3));
+      circle.on('pointerout', () => circle.setStrokeStyle(2, 0x131e2b));
+      circle.on('pointerdown', () => {
+        this.toggleWorld(false);
+        this.openCountryChart(cid);
+      });
+      this.worldFrame.group.add(circle); this.worldDynamicNodes.push(circle);
+
+      const label = this.add.text(pos.x, pos.y - r - 6, reg?.name ?? cid, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#e8edf3', fontStyle: 'bold',
+      }).setOrigin(0.5, 1).setDepth(60);
+      this.worldFrame.group.add(label); this.worldDynamicNodes.push(label);
+
+      const popLabel = this.add.text(pos.x, pos.y + r + 4, `${Math.round(pop)} pop`, {
+        fontFamily: 'monospace', fontSize: '9px', color: '#9aa4ad',
+      }).setOrigin(0.5, 0).setDepth(60);
+      this.worldFrame.group.add(popLabel); this.worldDynamicNodes.push(popLabel);
+    }
+
+    // ---- Legend ----
+    const legendText = selectedPid
+      ? `▶ flow direction = exporter→importer    │    thickness = ${days}d net volume of ${PRODUCIBLES[selectedPid].name}    │    click country to inspect`
+      : `▶ flow direction = exporter→importer    │    thickness = ${days}d net volume (all goods)    │    click country to inspect`;
+    const legend = this.add.text(x + 18, contentBottom - 14, legendText, {
+      fontFamily: 'monospace', fontSize: '9px', color: '#566370',
+    });
+    this.worldFrame.group.add(legend); this.worldDynamicNodes.push(legend);
   }
 
   // -----------------------------------------------------------------------
@@ -1618,8 +2692,7 @@ export class Game extends Phaser.Scene {
   openOfferModal({ tile, mode }) {
     const s = this.state;
     if (!s.ui.offerOpen) {
-      s.ui.savedSpeedIdx = s.time.speedIdx;
-      setSpeed(s, 0);
+      this.enterModal();
     }
     s.ui.offerOpen = true;
     this.offerCtx = { tileId: tile.id, mode };
@@ -1639,7 +2712,7 @@ export class Game extends Phaser.Scene {
   }
 
   closeOfferModal() {
-    if (this.state.ui.offerOpen) setSpeed(this.state, this.state.ui.savedSpeedIdx ?? 1);
+    if (this.state.ui.offerOpen) this.exitModal();
     this.state.ui.offerOpen = false;
     this.offerGroup.setVisible(false);
     this.refreshTopBar();
@@ -1923,6 +2996,10 @@ export class Game extends Phaser.Scene {
   bounceTile(tileId, peakScale = 1.25) {
     const rect = this.tileRects[tileId];
     if (!rect) return;
+    // Skip if a bounce is already in flight on this tile — overlapping bounces
+    // race on the origin/position restore in onComplete and cause visual jumps.
+    if (rect._bouncing) return;
+    rect._bouncing = true;
     const cx = rect.x + (MAP.tilePx - 1) * 0.5;
     const cy = rect.y + (MAP.tilePx - 1) * 0.5;
     rect.setOrigin(0.5, 0.5);
@@ -1938,6 +3015,7 @@ export class Game extends Phaser.Scene {
         rect.setOrigin(0, 0);
         rect.x = cx - (MAP.tilePx - 1) * 0.5;
         rect.y = cy - (MAP.tilePx - 1) * 0.5;
+        rect._bouncing = false;
       },
     });
   }

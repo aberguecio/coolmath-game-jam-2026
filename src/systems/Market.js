@@ -5,20 +5,19 @@
 // runs through executeTransaction to guarantee taxes/wages/ledger consistency.
 
 import { MARKET, ECONOMY_DEFAULTS, WAGES } from '../data/tunables.js';
-import { PRODUCIBLES, PRODUCIBLE_IDS, isFood, isTileGrowable } from '../data/producibles.js';
+import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
-import { effectiveTaxRates } from '../data/taxRates.js';
-import { distanceBetween, transportCost } from '../data/distances.js';
+import { transportCost } from '../data/distances.js';
+import { tickPriceIndex } from './PriceIndex.js';
+import { executeTransaction, walletOf } from './Transactions.js';
+import {
+  tickProductionDecisions, effectiveProduction,
+} from './Production.js';
 
-// =============================================================================
-// Helpers — wallets & ledger
-// =============================================================================
-function walletOf(state, ownerId) {
-  if (ownerId === 'player') return state.player;
-  if (ownerId === 'population' || ownerId === 'treasury') return null;
-  if (ownerId === 'foreign') return null;
-  return state.aiFarmers?.find(a => a.id === ownerId) ?? null;
-}
+export { executeTransaction } from './Transactions.js';
+export {
+  effectiveProductionFor, elasticityFor, elasticityTargetFor,
+} from './Production.js';
 
 export function marketParam(producible, key) {
   return producible.market?.[key] ?? ECONOMY_DEFAULTS[key];
@@ -100,50 +99,21 @@ export function initMarket(state) {
 }
 
 // =============================================================================
-// Production elasticity (delay-line, per-country)
-// =============================================================================
-function plantingDecision(state, country, producibleId) {
-  const def = PRODUCIBLES[producibleId];
-  if (!def) return 1;
-  const basePrice = marketParam(def, 'basePrice') || 1;
-  const localPrice = state.market.prices[country.id]?.[producibleId] || basePrice;
-  const ratio = localPrice / basePrice;
-  const reg = COUNTRIES[country.id];
-  const responsiveness = reg?.supplyResponsiveness ?? 1.0;
-  const factor = 1 + (ratio - 1) * responsiveness;
-  return Math.max(MARKET.elasticityMin, Math.min(MARKET.elasticityMax, factor));
-}
-
-function tickProductionDecisions(state) {
-  for (const cid of COUNTRY_IDS) {
-    const c = state.countries[cid];
-    for (const pid of PRODUCIBLE_IDS) {
-      const def = PRODUCIBLES[pid];
-      // Processed producibles aren't farmed — no decision log meaningful.
-      if (!isTileGrowable(pid)) continue;
-      if (!c.decisionLog[pid]) c.decisionLog[pid] = [1.0];
-      const log = c.decisionLog[pid];
-      log.push(plantingDecision(state, c, pid));
-      const maxLen = (def?.growthDays || 90) + 1;
-      while (log.length > maxLen) log.shift();
-    }
-  }
-}
-
-function effectiveProduction(state, country, producibleId) {
-  const base = country.production[producibleId] || 0;
-  if (base <= 0) return 0;
-  if (!isTileGrowable(producibleId)) return base; // processed: no elasticity, just baseline
-  const log = country.decisionLog?.[producibleId];
-  const scale = (log && log.length > 0) ? log[0] : 1.0;
-  return base * scale;
-}
-
-// =============================================================================
 // Daily market tick
 // =============================================================================
+const TRADE_FLOW_KEEP_DAYS = 60;
+
 export function tickMarket(state) {
   tickProductionDecisions(state);
+
+  // Prune old trade-flow records once per day. The World view needs at most
+  // 30 days of history; we keep 60 as a buffer.
+  if (state.tradeFlows && state.tradeFlows.length) {
+    const cutoff = state.time.totalDays - TRADE_FLOW_KEEP_DAYS;
+    let keepFrom = 0;
+    while (keepFrom < state.tradeFlows.length && state.tradeFlows[keepFrom].day < cutoff) keepFrom++;
+    if (keepFrom > 0) state.tradeFlows.splice(0, keepFrom);
+  }
 
   const m = state.market;
   for (const pid of PRODUCIBLE_IDS) m.dailyConsumption[pid] = 0;
@@ -180,8 +150,10 @@ export function tickMarket(state) {
       const dstPrice = m.prices[dst][pid];
       const dstInv = m.inventory[dst][pid] || 0;
       const dstTarget = m.targetStock[dst][pid] || 50;
-      // Only import if local stock is below target (deficit pressure)
-      if (dstInv > dstTarget * 0.8) continue;
+      // Only refuse to import when fully stocked. The inner loop already
+      // requires `delivered < dstPrice`, so we don't import unless there's a
+      // real price gap.
+      if (dstInv >= dstTarget) continue;
       // Find cheapest source (foreign + transport) under dstPrice.
       let bestSrc = null, bestDelivered = Infinity;
       for (const src of COUNTRY_IDS) {
@@ -197,13 +169,19 @@ export function tickMarket(state) {
       }
       if (bestSrc) {
         const maxUnits = Math.min(
-          m.inventory[bestSrc][pid] * 0.05,                  // up to 5% of source per day
-          (dstTarget - dstInv) * 0.5,                        // close half the gap
+          m.inventory[bestSrc][pid] * 0.10,                  // up to 10% of source per day
+          (dstTarget - dstInv) * 0.7,                        // close 70% of the gap
         );
         const units = Math.max(0, Math.floor(maxUnits));
         if (units > 0) {
           m.inventory[bestSrc][pid] -= units;
           m.inventory[dst][pid]    += units;
+          // Record the transfer so the World view can render directional flows.
+          if (!state.tradeFlows) state.tradeFlows = [];
+          state.tradeFlows.push({
+            day: state.time.totalDays,
+            src: bestSrc, dst, pid, units,
+          });
         }
       }
     }
@@ -229,7 +207,8 @@ export function tickMarket(state) {
 
       m.prices[cid][pid] = Math.max(MARKET.absoluteMinPrice, newPrice);
       m.history[cid][pid].push(m.prices[cid][pid]);
-      if (m.history[cid][pid].length > 360) m.history[cid][pid].shift();
+      // History is unbounded — push is O(1) and memory cost is small (one
+      // float per producible × country × day). A 50-year game ≈ 10MB.
     }
   }
 
@@ -273,319 +252,24 @@ export function marketInventoryOf(state, producibleId, countryId = PLAYER_COUNTR
   return state.market.inventory?.[countryId]?.[producibleId] ?? 0;
 }
 
-export function effectiveProductionFor(state, countryId, producibleId) {
-  const c = state.countries[countryId];
-  if (!c) return 0;
-  return effectiveProduction(state, c, producibleId);
-}
-
-export function elasticityFor(state, countryId, producibleId) {
-  const c = state.countries[countryId];
-  if (!c) return 1;
-  const log = c.decisionLog?.[producibleId];
-  if (!log || log.length === 0) return 1;
-  return log[0];
-}
-
-export function elasticityTargetFor(state, countryId, producibleId) {
-  const c = state.countries[countryId];
-  if (!c) return 1;
-  return plantingDecision(state, c, producibleId);
-}
-
-// =============================================================================
-// Inflation: price index per country, EMA of weighted food + materials basket
-// =============================================================================
-const INDEX_WEIGHTS = { food: 0.70, material: 0.30 };
-const PRICE_INDEX_HALFLIFE_DAYS = 60;
-const PRICE_INDEX_ALPHA = 1 - Math.pow(0.5, 1 / PRICE_INDEX_HALFLIFE_DAYS); // ~0.0115
-
-export function tickPriceIndex(state) {
-  for (const cid of COUNTRY_IDS) {
-    const c = state.countries[cid];
-    if (!c) continue;
-
-    let foodNum = 0, foodDen = 0;
-    let matNum = 0, matDen = 0;
-    for (const pid of PRODUCIBLE_IDS) {
-      const def = PRODUCIBLES[pid];
-      if (!def) continue;
-      const base = marketParam(def, 'basePrice') || 1;
-      const localPrice = state.market.prices[cid][pid] || base;
-      const ratio = localPrice / base;
-      const cons = c.consumption[pid] || 0;
-      if (def.commodityType === 'food') {
-        const w = cons * (def.nutritionUnits || 1);
-        foodNum += ratio * w;
-        foodDen += w;
-      } else {
-        const w = Math.max(cons, 0.1);
-        matNum += ratio * w;
-        matDen += w;
-      }
-    }
-    const foodComp = foodDen > 0 ? foodNum / foodDen : 1;
-    const matComp = matDen > 0 ? matNum / matDen : 1;
-    const basket = INDEX_WEIGHTS.food * foodComp + INDEX_WEIGHTS.material * matComp;
-    c.priceIndex = (1 - PRICE_INDEX_ALPHA) * c.priceIndex + PRICE_INDEX_ALPHA * basket;
-    c.priceIndexHistory.push(c.priceIndex);
-    if (c.priceIndexHistory.length > 360) c.priceIndexHistory.shift();
+// Sum trade flows in the last `days` from src→dst. If `producibleId` is null,
+// sums across all producibles. Used by the World view to render arrow widths.
+export function tradeFlowVolume(state, src, dst, producibleId = null, days = 30) {
+  const flows = state.tradeFlows;
+  if (!flows || flows.length === 0) return 0;
+  const cutoff = state.time.totalDays - days;
+  let sum = 0;
+  for (let i = flows.length - 1; i >= 0; i--) {
+    const f = flows[i];
+    if (f.day < cutoff) break;
+    if (f.src !== src || f.dst !== dst) continue;
+    if (producibleId && f.pid !== producibleId) continue;
+    sum += f.units;
   }
+  return sum;
 }
 
-// Public selectors used by UI / other systems
-export function priceIndexFor(state, countryId = PLAYER_COUNTRY_ID) {
-  return state.countries?.[countryId]?.priceIndex ?? 1.0;
-}
-export function marketPoolFor(state, countryId = PLAYER_COUNTRY_ID) {
-  return state.countries?.[countryId]?.marketPool ?? 0;
-}
-
-// Effective (inflation-adjusted) costs
-export function effectiveSalary(state, cid, recipe) {
-  return Math.round((recipe?.monthlySalary || 0) * priceIndexFor(state, cid));
-}
-export function effectiveBuildCost(state, cid, recipe) {
-  return Math.round((recipe?.buildCost || 0) * priceIndexFor(state, cid));
-}
-export function effectivePlowCost(state, cid, baseCost) {
-  return Math.round(baseCost * priceIndexFor(state, cid));
-}
-export function effectiveSeedCost(state, cid, def) {
-  return Math.round((def?.seedCost || 0) * priceIndexFor(state, cid));
-}
-export function effectiveBaseRural(state, cid, basePrice) {
-  return basePrice * priceIndexFor(state, cid);
-}
-export function effectiveSurveyCost(state, cid, baseCost) {
-  return Math.round(baseCost * priceIndexFor(state, cid));
-}
-
-// Total money supply across all entities — for diagnostics. Should be near-constant.
-export function totalMoneySupply(state) {
-  let total = 0;
-  if (state.player) total += state.player.cash || 0;
-  if (state.aiFarmers) for (const a of state.aiFarmers) total += a.cash || 0;
-  for (const cid of COUNTRY_IDS) {
-    const c = state.countries[cid];
-    if (!c) continue;
-    total += (c.wageFund || 0) + (c.treasury || 0) + (c.marketPool || 0);
-  }
-  return total;
-}
-
-// =============================================================================
-// executeTransaction — single chokepoint for all monetary movement
-// =============================================================================
-//
-// types:
-//   'sale'  retail (population buys from market)         — sale tax
-//   'b2b'   company-to-company / industry buys input    — b2b tax
-//   'import' cross-country arrival                       — import tax (stacks on source sale)
-//
-// sellerId / buyerId may be: 'player' | aiId | 'population' | 'treasury' | 'foreign'
-//
-// Returns explicitly { ok, reason?, grossRevenue, taxPaid, wagePaid, transportPaid, netToSeller }.
-export function executeTransaction(state, params) {
-  const {
-    sellerId, buyerId,
-    productId, units, unitPrice,
-    countryOfTransaction,
-    type = 'sale',
-    sellerCountryId,
-  } = params;
-
-  if (!Number.isFinite(units) || units <= 0) {
-    return { ok: false, reason: 'units<=0' };
-  }
-  if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
-    return { ok: false, reason: 'unitPrice<=0' };
-  }
-  if (!PRODUCIBLES[productId]) {
-    return { ok: false, reason: 'unknown product' };
-  }
-  if (!state.countries[countryOfTransaction]) {
-    return { ok: false, reason: 'unknown country' };
-  }
-
-  const def = PRODUCIBLES[productId];
-  const grossRevenue = unitPrice * units;
-  const rates = effectiveTaxRates(state, countryOfTransaction);
-  const rate = rates[type] ?? rates.sale ?? 0;
-  const taxPaid = grossRevenue * rate;
-  const tCost = (sellerCountryId && sellerCountryId !== countryOfTransaction)
-    ? transportCost(sellerCountryId, countryOfTransaction, units)
-    : 0;
-  const totalCost = grossRevenue + taxPaid + tCost;
-
-  // Verify buyer can pay (skip for population/treasury — they have country pools).
-  const buyerWallet = walletOf(state, buyerId);
-  if (buyerWallet && buyerWallet.cash < totalCost) {
-    return { ok: false, reason: 'buyer cash insufficient' };
-  }
-  // For population: check country.wageFund. For treasury: check treasury balance (negative ok).
-  if (buyerId === 'population') {
-    const c = state.countries[countryOfTransaction];
-    if (!c || c.wageFund < totalCost) return { ok: false, reason: 'wageFund insufficient' };
-  }
-
-  // Wage portion is computed up-front — only flows when seller is a real producer.
-  const sellerWallet = walletOf(state, sellerId);
-  const isRealSeller = !!sellerWallet;
-  const isRealBuyer = !!buyerWallet;
-  const wagePortion = (isRealSeller && (type === 'sale' || type === 'b2b'))
-    ? (def.wagePortion ?? 0.20) : 0;
-  const wagePaid = grossRevenue * wagePortion;
-  const netToSeller = grossRevenue - wagePaid;
-  const sellerCountry = sellerCountryId || countryOfTransaction;
-
-  // Routing is determined by who is real and who is virtual. The marketPool of the
-  // appropriate country is the counter-party for every 'foreign' role. wageFund pays
-  // for population. Money is conserved per the table in the plan.
-  const txCountry = state.countries[countryOfTransaction];
-  const sellerCountryRuntime = state.countries[sellerCountry];
-
-  // Verify funds before mutating.
-  if (isRealBuyer) {
-    if (buyerWallet.cash < totalCost) return { ok: false, reason: 'buyer cash insufficient' };
-  } else if (buyerId === 'population') {
-    if (txCountry.wageFund < totalCost) return { ok: false, reason: 'wageFund insufficient' };
-  } else if (buyerId === 'treasury') {
-    // Treasury is allowed to go negative via crisis path; no precheck.
-  } else if (buyerId === 'foreign') {
-    // marketPool of the seller-country buys (it absorbs production).
-    // Need enough to pay seller and wages.
-    if (sellerCountryRuntime.marketPool < (netToSeller + wagePaid)) {
-      // Saturation: bump counter, return failure so caller skips the sale.
-      sellerCountryRuntime.saturatedDays[productId] =
-        (sellerCountryRuntime.saturatedDays[productId] || 0) + 1;
-      return { ok: false, reason: 'marketPool dry (saturated)' };
-    }
-  }
-
-  // === Mutate ===
-  // Reset saturation on success.
-  if (sellerCountryRuntime?.saturatedDays?.[productId]) {
-    sellerCountryRuntime.saturatedDays[productId] = 0;
-  }
-
-  // 1. Pull cash from buyer side.
-  if (isRealBuyer) {
-    buyerWallet.cash -= totalCost;
-  } else if (buyerId === 'population') {
-    txCountry.wageFund -= totalCost;
-  } else if (buyerId === 'treasury') {
-    txCountry.treasury -= totalCost;
-  } else if (buyerId === 'foreign') {
-    // marketPool[sellerCountry] is the buyer absorbing production
-    sellerCountryRuntime.marketPool -= (netToSeller + wagePaid + taxPaid);
-  }
-
-  // 2. Tax flows to the country where the transaction occurred.
-  txCountry.treasury += taxPaid;
-
-  // 3. Wages flow into seller's country wageFund (only when real producer).
-  if (isRealSeller && wagePaid > 0) {
-    sellerCountryRuntime.wageFund += wagePaid;
-  }
-
-  // 4. Pay the seller side.
-  if (isRealSeller) {
-    sellerWallet.cash += netToSeller;
-  } else if (sellerId === 'foreign') {
-    // marketPool[txCountry] receives the cash for goods it just delivered.
-    txCountry.marketPool += grossRevenue;
-  }
-  // (population/treasury never sell; their branches above are no-ops.)
-
-  // 5. Ledger
-  if (!state.ledger) state.ledger = [];
-  state.ledger.push({
-    day: state.time.totalDays,
-    type, productId, units, unitPrice,
-    sellerId, buyerId,
-    countryOfTransaction, sellerCountryId: sellerCountry,
-    grossRevenue, taxPaid, wagePaid, transportPaid: tCost, netToSeller,
-  });
-  if (state.ledger.length > 200) state.ledger.shift();
-
-  return {
-    ok: true,
-    grossRevenue, taxPaid, wagePaid, transportPaid: tCost, netToSeller,
-  };
-}
-
-// =============================================================================
-// Population spending — affordability-driven, with substitution cascade
-// =============================================================================
-export function populationSpend(state) {
-  for (const cid of COUNTRY_IDS) {
-    const c = state.countries[cid];
-    const reg = COUNTRIES[cid];
-    const m = state.market;
-    if (!reg || !c) continue;
-
-    // Reset daily nutrition tally
-    c.dailyNutritionConsumed = 0;
-
-    // Build a sorted list of food producibles by preference × nutritionUnits / price.
-    const candidates = [];
-    for (const pid of PRODUCIBLE_IDS) {
-      if (!isFood(pid)) continue;
-      const prefBase = reg.preferences?.[pid] ?? 0;
-      // Crisis preference compression: premium foods fade
-      const crush = c.fiscalCrisis?.preferenceCrush ?? 0;
-      const nutrition = PRODUCIBLES[pid].nutritionUnits ?? 0.5;
-      const isPremium = nutrition < 0.7;
-      const prefMod = c.preferenceModifiers?.[pid] ?? 1;
-      const pref = prefBase * prefMod * (isPremium ? Math.max(0.2, 1 - crush) : 1 + crush * 0.5);
-      if (pref <= 0) continue;
-      const price = m.prices[cid][pid];
-      const score = pref * nutrition / Math.max(0.5, price);
-      candidates.push({ pid, pref, price, nutrition, score });
-    }
-    candidates.sort((a, b) => b.score - a.score);
-
-    let budget = c.wageFund;
-    const totalPref = candidates.reduce((s, x) => s + x.pref, 0) || 1;
-
-    for (const cand of candidates) {
-      if (budget <= 0) break;
-      const inv = m.inventory[cid][cand.pid] || 0;
-      if (inv <= 0) continue;
-      // Allocate share of budget by preference weight
-      const allocate = budget * (cand.pref / totalPref);
-      const rates = effectiveTaxRates(state, cid);
-      const unitTotal = cand.price * (1 + rates.sale);
-      const wantUnits = allocate / unitTotal;
-      const buyUnits = Math.min(wantUnits, inv);
-      if (buyUnits <= 0) continue;
-      // Atomic transaction
-      const r = executeTransaction(state, {
-        sellerId: 'foreign',                 // population buys from the country market pool
-        buyerId: 'population',
-        productId: cand.pid,
-        units: buyUnits,
-        unitPrice: cand.price,
-        countryOfTransaction: cid,
-        sellerCountryId: cid,
-        type: 'sale',
-      });
-      if (!r.ok) continue;
-      m.inventory[cid][cand.pid] -= buyUnits;
-      c.dailyNutritionConsumed += buyUnits * cand.nutrition;
-      budget -= (r.grossRevenue + r.taxPaid);
-    }
-
-    // Welfare top-up: if wageFund below floor, treasury fills the gap
-    const floor = reg.population * WAGES.dailyFoodCostPerCapita * WAGES.wageFundFloorDays;
-    if (c.wageFund < floor) {
-      const gap = floor - c.wageFund;
-      c.wageFund += gap;
-      c.treasury -= gap;
-    }
-  }
-}
+export { populationSpend } from './Population.js';
 
 // =============================================================================
 // Sellers route harvests through their local country

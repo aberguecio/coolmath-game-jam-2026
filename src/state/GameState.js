@@ -86,6 +86,27 @@ function generateTilesFor(countryId, seed) {
         boomFactor: 1,
         pendingOffer: null,
         autoReplant: false,
+        // Auto-management: when true, plowing/planting/harvesting fire automatically
+        // and the tile pays harvestCost / setup costs (= "hires labor"). Default OFF
+        // means the player has to click each action manually — solo farming, no labor cost.
+        // AI farmers always operate as if autoMode = true (hired-labor model).
+        autoMode: false,
+        // Land lock-in: once a tile is committed to a category it stays committed
+        // even after the venture ends. Permitted values: null | 'crop' | 'mining' | 'industry'.
+        // Set on first plantTile / buildIndustry; never cleared (uproot keeps lockType).
+        lockType: null,
+        // Mining status machine. 'operational' = pays monthlyOpCost and produces.
+        // 'closed' = paused (no cost, no production). Only meaningful for mining tiles.
+        miningStatus: 'operational',
+        // Day the tile first entered 'mature'. Drives the grace-period rot/regrow
+        // logic — an annual past `FARMING.harvestGraceDays` rots; a perennial
+        // falls back to 'cosechado' losing that cycle's fruit. Cleared on
+        // successful harvest / uproot / rot.
+        matureSinceDay: null,
+        // How many consecutive cycles autoHarvest skipped this tile because
+        // revenue < cost × profitMargin. Used by AI to uproot chronically
+        // unprofitable perennials even before they get harvested at a loss.
+        skipStreak: 0,
         // Industry / housing
         industryId: null,             // industry record id placed here (if any)
         developmentDay: null,         // when developed-tile was completed
@@ -198,9 +219,11 @@ export function createInitialState() {
     log: [{ day: 0, text: 'Welcome. You own 1 plot in Home and $0. Visit the bank.' }],
     aiFarmers: [],
     activeEvents: [],
+    eventHistory: [],
     fxQueue: [],
     ledger: [],                        // ring of recent transactions for debug/audit (last 200)
     aiDecisionLog: [],                 // ring of recent AI build/close decisions
+    tradeFlows: [],                    // {day, src, dst, pid, units} — last ~60 days, used by World view
     tutorial: loadTutorialState(),
     ui: {
       bankOpen: false,
@@ -231,6 +254,11 @@ export function createInitialState() {
     };
     c.dailyNutritionConsumed = 0;
     c.dailyNutritionNeed = c.population * WAGES.dailyFoodCostPerCapita * 0.25;
+    // Labor market — Sprint A. wageRate emerges from demand/supply via tickLaborMarket.
+    c.wageRate = WAGES.baseWage;
+    c.wageRateHistory = [WAGES.baseWage];
+    c.laborSupply = c.population * WAGES.workersPerPopUnit;
+    c.laborDemand = 0;          // populated on first tickLaborMarket
   }
 
   initMarket(state);

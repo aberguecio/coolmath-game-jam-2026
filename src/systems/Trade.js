@@ -167,6 +167,12 @@ function settleTransfer(state, tile, buyerId, sellerId, amount) {
   seller.cash += amount;
   tile.owner = buyerId;
   tile.pendingOffer = null;
+  // Industry on the tile transfers with the land — otherwise the prior owner
+  // keeps collecting output revenue from a factory they no longer own.
+  if (tile.industryId) {
+    const ind = state.industries?.find(i => i.id === tile.industryId);
+    if (ind) ind.ownerId = buyerId;
+  }
 
   pushLog(state, `Tile (${tile.x},${tile.y}) sold for $${amount}`);
   // Coin trail follows the cash, from buyer's wallet to seller's wallet.

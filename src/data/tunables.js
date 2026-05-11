@@ -53,7 +53,7 @@ export const FORECLOSURE = {
 
 // Surveying & mineral discovery
 export const MINERALS = {
-  surveyCost: 300,                 // cash to test a tile for minerals
+  surveyLabor: 6,                  // labor (worker-months) to survey a tile; cash = labor × wageRate
   discoveryRadius: 3,              // tiles around a discovered mineral get a price boost
   discoveryBoost: 0.6,             // adds up to +60% to nearby tile prices, fades with distance
   maxBoom: 2.5,                    // hard cap on cumulative boom multiplier
@@ -87,13 +87,41 @@ export const TILE = {
 };
 
 export const LAND_ACTIONS = {
-  plow: { cost: 50, fromState: 'fallow', toState: 'plowed' },
+  // labor in worker-months; cash cost = labor × wageRate(country)
+  plow: { labor: 1, fromState: 'fallow', toState: 'plowed' },
 };
+
+// Farming behaviour tunables.
+// - harvestGraceDays: days a mature annual sits unharvested before it rots
+//   (perennials fall back to 'cosechado' instead — the plant survives, the
+//   crop is lost). Stops mature tiles from blocking indefinitely.
+// - harvestProfitMargin: autoHarvest only fires when the expected revenue is
+//   at least this much × labor cost. 1.05 = needs ≥5% margin. Otherwise the
+//   crop is skipped, increments tile.skipStreak, and risks rot if it never
+//   becomes profitable.
+// Storage — Sprint B. Holding inventory costs warehouse labor each month.
+// Charged per unit stored × wageRate(country); flows to country wageFund.
+// Creates an explicit cost of hoarding so AI prefers selling at fair prices
+// over waiting for impossible peaks.
+export const STORAGE = {
+  unitWarehouseLabor: 0.02,      // worker-months per unit per month
+};
+
+export const FARMING = {
+  harvestGraceDays: 30,
+  harvestProfitMargin: 1.05,
+  // Workers tending a crop tile while in cultivation (planted/mature/cosechado).
+  // Uniform across all crops so a wheat field and a manzano demand the same
+  // sustained labor — harvest spikes themselves are paid as cash cost, not
+  // counted in the labor-market demand.
+  tileTendingLabor: 1,
+};
+
 
 export const CITY = {
   x: 13,
   y: 7,
-  startPopulation: 5000,
+  startPopulation: 2000,       // matches town population — the city IS the town's urban core
   yearlyGrowth: 0.06,
   baseRadius: 2.5,
   radiusPerLogPop: 2.2,
@@ -111,6 +139,12 @@ export const AI = {
   loanAmount: 5000,
   names: ['Old Pete', 'Sofia Co-op', 'North Ranch', 'Cabrera Bros.'],
   colors: [0xb24cae, 0x4ca6b2, 0xb27a3a, 0x6a4cb2],
+  // === Inventory / sale strategy (Sprint B) ============================
+  // AI stops dump-selling harvests. Output goes to ai.inventory and is
+  // drained gradually when the spot price is close enough to the MA60.
+  sellThreshold: 0.85,           // sell only when currentPrice ≥ MA60 × this
+  sellRate: 0.15,                // 15% of stock sold per monthly attempt
+  inventoryCapDays: 30,          // hard cap = N days of local consumption; dump if exceeded
 };
 
 // Top-level event scheduler. Per-event-type stats live in eventTypes.js.
@@ -132,6 +166,17 @@ export const WAGES = {
   wageFundFloorDays: 2,
   // Industries pay this per month-rollover; closed if owner can't pay.
   // (each industry's salary is in industries.js; this is just a tunable safety net.)
+  // === Labor market (Sprint A) — wageRate emerges from supply/demand ===
+  // No clamps: if wageRate runs away, the feedback loop is broken (eg. labour
+  // demand growing without industries closing in response). Find the open
+  // loop, don't paper it over with a cap.
+  baseWage: 50,                  // $/mes/worker at neutral tightness × neutral priceIndex
+  // workersPerPopUnit: fraction of `country.population` that's working-age.
+  // 0.5 = half the citizens are in the labour force. With pop=2000, each town
+  // starts with 1000 workers — comfortable margin over the ~190-worker
+  // demand from seeded ventures.
+  workersPerPopUnit: 0.5,
+  emaHalfLifeDays: 60,           // smoothing window for wageRate EMA (friction, not a cap)
 };
 
 export const FISCAL_CRISIS = {
@@ -160,10 +205,19 @@ export const HOUSING = {
 export const INDUSTRY = {
   // ROI threshold for AI to build a new industry (per month, on buildCost).
   aiBuildRoiThreshold: 0.015,
+  // ROI threshold to reopen an existing closed industry — lower bar than fresh
+  // build because most fixed costs are sunk and reopen fee is discounted.
+  aiReopenRoiThreshold: 0.005,
   // AI uses this many days of moving-average prices for build/close decisions.
   aiPriceLookbackDays: 30,
+  // Shorter lookback for reopen check so recovery from saturation registers
+  // before the 30-day MA does.
+  aiReopenLookbackDays: 14,
   // Margin lookback before AI closes an industry.
   aiCloseMarginLookbackDays: 90,
+  // Reopening costs only this fraction of the original buildCost — facility
+  // exists, just needs restart capital. Applies to player AND AI reopens.
+  reopenCostFactor: 0.3,
 };
 
 // AI decision log buffer size (per company).

@@ -7,7 +7,6 @@
 //   commodityType    'food' | 'material' (drives population consumption rules)
 //   processStage     'raw' | 'processed' | 'final'
 //   nutritionUnits   (food only) caloric value per unit; 0 for materials
-//   wagePortion      fraction of every sale that becomes worker wages (0.10–0.40)
 //
 //   Tile-grown producibles only (skip for processed factory outputs):
 //     actionVerb, seedCost, requiresPlow,
@@ -15,6 +14,11 @@
 //     yieldUnits, yieldCurve { base, qualitySlope },
 //     perennial: null | { regrowDays, lifespanDays },
 //     patches?: mineral patch config
+//
+//   Production cost (paid by owner → wageFund, replaces the old wagePortion routing):
+//     harvestCost     (annual & perennial crops) — labor cost per harvest event,
+//                      only charged when autoHarvest fires (auto-mode tile)
+//     monthlyOpCost   (mining) — operating labor cost charged monthly while operational
 //
 //   market           { basePrice, ...optional overrides }
 
@@ -24,8 +28,9 @@ export const PRODUCIBLES = {
     id: 'wheat', name: 'Wheat', color: 0xe8c46b,
     category: 'annual_crop',
     commodityType: 'food', processStage: 'raw',
-    nutritionUnits: 1.2, wagePortion: 0.35,
-    seedCost: 200, requiresPlow: true,
+    nutritionUnits: 1.2,
+    setupLabor: 4, requiresPlow: true,    // labor × wageRate + 0.1 × marketPrice (crop seed)
+    harvestLabor: 3,                      // worker-months equivalent per harvest event (× wageRate)
     growthDays: 90,
     growthCurve: { base: 0.7, qualitySlope: 0.6 },
     yieldUnits: 5,
@@ -39,8 +44,9 @@ export const PRODUCIBLES = {
     id: 'corn', name: 'Corn', color: 0xf5d147,
     category: 'annual_crop',
     commodityType: 'food', processStage: 'raw',
-    nutritionUnits: 1.0, wagePortion: 0.35,
-    seedCost: 400, requiresPlow: true,
+    nutritionUnits: 1.0,
+    setupLabor: 8, requiresPlow: true,
+    harvestLabor: 6,
     growthDays: 150,
     growthCurve: { base: 0.7, qualitySlope: 0.6 },
     yieldUnits: 7,
@@ -54,8 +60,9 @@ export const PRODUCIBLES = {
     id: 'potato', name: 'Potato', color: 0xa07a4a,
     category: 'annual_crop',
     commodityType: 'food', processStage: 'raw',
-    nutritionUnits: 1.1, wagePortion: 0.35,
-    seedCost: 250, requiresPlow: true,
+    nutritionUnits: 1.1,
+    setupLabor: 5, requiresPlow: true,
+    harvestLabor: 3,
     growthDays: 70,
     growthCurve: { base: 0.8, qualitySlope: 0.5 },
     yieldUnits: 8,
@@ -69,8 +76,9 @@ export const PRODUCIBLES = {
     id: 'apple', name: 'Apple Tree', color: 0xd14b3a,
     category: 'perennial_crop',
     commodityType: 'food', processStage: 'raw',
-    nutritionUnits: 0.7, wagePortion: 0.30,
-    seedCost: 2000, requiresPlow: true,
+    nutritionUnits: 0.7,
+    setupLabor: 40, requiresPlow: true,
+    harvestLabor: 16,
     growthDays: 730,
     growthCurve: { base: 0.7, qualitySlope: 0.6 },
     yieldUnits: 22,
@@ -84,8 +92,9 @@ export const PRODUCIBLES = {
     id: 'cherry', name: 'Cherry Tree', color: 0xc73654,
     category: 'perennial_crop',
     commodityType: 'food', processStage: 'raw',
-    nutritionUnits: 0.5, wagePortion: 0.30,
-    seedCost: 2800, requiresPlow: true,
+    nutritionUnits: 0.5,
+    setupLabor: 56, requiresPlow: true,
+    harvestLabor: 21,
     growthDays: 1095,
     growthCurve: { base: 0.6, qualitySlope: 0.8 },
     yieldUnits: 16,
@@ -100,9 +109,10 @@ export const PRODUCIBLES = {
     id: 'copper', name: 'Copper', color: 0xc97f3a,
     category: 'mining',
     commodityType: 'material', processStage: 'raw',
-    nutritionUnits: 0, wagePortion: 0.10,
+    nutritionUnits: 0,
     actionVerb: 'Mine',
-    seedCost: 4000, requiresPlow: false,
+    setupLabor: 80, requiresPlow: false,
+    monthlyLabor: 1,                      // workers × wageRate = monthly op cost
     growthDays: 270,
     growthCurve: { base: 0.8, qualitySlope: 0.4 },
     yieldUnits: 1,
@@ -117,9 +127,10 @@ export const PRODUCIBLES = {
     id: 'iron', name: 'Iron', color: 0x6e6e75,
     category: 'mining',
     commodityType: 'material', processStage: 'raw',
-    nutritionUnits: 0, wagePortion: 0.10,
+    nutritionUnits: 0,
     actionVerb: 'Mine',
-    seedCost: 2500, requiresPlow: false,
+    setupLabor: 50, requiresPlow: false,
+    monthlyLabor: 1,
     growthDays: 180,
     growthCurve: { base: 0.85, qualitySlope: 0.3 },
     yieldUnits: 2,
@@ -134,9 +145,10 @@ export const PRODUCIBLES = {
     id: 'gold', name: 'Gold', color: 0xffd942,
     category: 'mining',
     commodityType: 'material', processStage: 'raw',
-    nutritionUnits: 0, wagePortion: 0.08,
+    nutritionUnits: 0,
     actionVerb: 'Mine',
-    seedCost: 9000, requiresPlow: false,
+    setupLabor: 180, requiresPlow: false,
+    monthlyLabor: 1,
     growthDays: 365,
     growthCurve: { base: 0.5, qualitySlope: 0.9 },
     yieldUnits: 1,
@@ -154,7 +166,7 @@ export const PRODUCIBLES = {
     id: 'flour', name: 'Flour', color: 0xeec27a,
     category: 'processed',
     commodityType: 'food', processStage: 'processed',
-    nutritionUnits: 0.9, wagePortion: 0.25,
+    nutritionUnits: 0.9,
     market: { basePrice: 120 },
   },
 
@@ -162,7 +174,7 @@ export const PRODUCIBLES = {
     id: 'juice', name: 'Apple Juice', color: 0xff8a4a,
     category: 'processed',
     commodityType: 'food', processStage: 'processed',
-    nutritionUnits: 0.6, wagePortion: 0.25,
+    nutritionUnits: 0.6,
     market: { basePrice: 200 },
   },
 
@@ -170,7 +182,7 @@ export const PRODUCIBLES = {
     id: 'jewelry', name: 'Jewelry', color: 0xffe066,
     category: 'processed',
     commodityType: 'material', processStage: 'final',
-    nutritionUnits: 0, wagePortion: 0.30,
+    nutritionUnits: 0,
     market: { basePrice: 1200 },
   },
 
@@ -178,7 +190,7 @@ export const PRODUCIBLES = {
     id: 'steel', name: 'Steel', color: 0x9da0a6,
     category: 'processed',
     commodityType: 'material', processStage: 'processed',
-    nutritionUnits: 0, wagePortion: 0.25,
+    nutritionUnits: 0,
     market: { basePrice: 220 },
   },
 
@@ -186,7 +198,7 @@ export const PRODUCIBLES = {
     id: 'cable', name: 'Cable', color: 0xb86a3a,
     category: 'processed',
     commodityType: 'material', processStage: 'processed',
-    nutritionUnits: 0, wagePortion: 0.25,
+    nutritionUnits: 0,
     market: { basePrice: 380 },
   },
 
@@ -194,7 +206,7 @@ export const PRODUCIBLES = {
     id: 'pie', name: 'Cherry Pie', color: 0xd14b8a,
     category: 'processed',
     commodityType: 'food', processStage: 'final',
-    nutritionUnits: 1.4, wagePortion: 0.30,
+    nutritionUnits: 1.4,
     market: { basePrice: 280 },
   },
 };
