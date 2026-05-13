@@ -7,9 +7,9 @@
 import { MARKET, ECONOMY_DEFAULTS, WAGES } from '../data/tunables.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
-import { transportCost } from '../data/distances.js';
 import { tickPriceIndex } from './PriceIndex.js';
 import { executeTransaction, walletOf } from './Transactions.js';
+import { recordMarketSnapshot } from './MarketHistory.js';
 import {
   tickProductionDecisions, effectiveProduction,
 } from './Production.js';
@@ -37,6 +37,7 @@ export function createCountriesState() {
       consumption: { ...c.consumption },
       production: { ...c.domesticProduction },
       supplyToday: {},
+      consumptionDay: {},               // per-country daily consumption (parallel to global m.dailyConsumption); reset at top of tickMarket, accumulated in populationSpend. Lives here so the market snapshot can record per-country food consumption — used by the debug CSV export.
       preferenceModifiers: {},
       tradeBalanceEMA: {},
       decisionLog: {},
@@ -117,6 +118,13 @@ export function tickMarket(state) {
 
   const m = state.market;
   for (const pid of PRODUCIBLE_IDS) m.dailyConsumption[pid] = 0;
+  // Per-country daily consumption — parallel to the global m.dailyConsumption
+  // but split by country so the debug CSV can show "how much did Oakdale eat
+  // today" without scanning the ledger. Accumulated below + in populationSpend.
+  for (const cid of COUNTRY_IDS) {
+    if (!state.countries[cid].consumptionDay) state.countries[cid].consumptionDay = {};
+    for (const pid of PRODUCIBLE_IDS) state.countries[cid].consumptionDay[pid] = 0;
+  }
 
   // Per-country: resolve local supply/demand, update local inventory.
   for (const cid of COUNTRY_IDS) {
@@ -136,56 +144,21 @@ export function tickMarket(state) {
         const taken = Math.min(want, have);
         m.inventory[cid][pid] = have - taken;
         m.dailyConsumption[pid] += taken;
+        c.consumptionDay[pid] = (c.consumptionDay[pid] || 0) + taken;
       }
       const prev = c.tradeBalanceEMA[pid] ?? 0;
       c.tradeBalanceEMA[pid] = prev * 0.85 + tradeBalance * 0.15;
     }
-    c.supplyToday = {};
+    // supplyToday reset moved to end of tickMarket so the snapshot recorder
+    // can read today's supply before it gets wiped. Confirmed no other system
+    // (Forecast / Exporters / AI / Industries) reads supplyToday after this
+    // point — grep showed only the writes in sellToMarket/sellFromInventory.
   }
 
-  // Cross-country arbitrage — if a country's price > another's price + transport, ship units.
-  // Limited per pair per day so prices don't fully equalize instantly.
-  for (const pid of PRODUCIBLE_IDS) {
-    for (const dst of COUNTRY_IDS) {
-      const dstPrice = m.prices[dst][pid];
-      const dstInv = m.inventory[dst][pid] || 0;
-      const dstTarget = m.targetStock[dst][pid] || 50;
-      // Only refuse to import when fully stocked. The inner loop already
-      // requires `delivered < dstPrice`, so we don't import unless there's a
-      // real price gap.
-      if (dstInv >= dstTarget) continue;
-      // Find cheapest source (foreign + transport) under dstPrice.
-      let bestSrc = null, bestDelivered = Infinity;
-      for (const src of COUNTRY_IDS) {
-        if (src === dst) continue;
-        const srcInv = m.inventory[src][pid] || 0;
-        if (srcInv <= 0) continue;
-        const srcPrice = m.prices[src][pid];
-        const tCost = transportCost(src, dst, 1);
-        const delivered = srcPrice + tCost;
-        if (delivered < dstPrice && delivered < bestDelivered) {
-          bestSrc = src; bestDelivered = delivered;
-        }
-      }
-      if (bestSrc) {
-        const maxUnits = Math.min(
-          m.inventory[bestSrc][pid] * 0.10,                  // up to 10% of source per day
-          (dstTarget - dstInv) * 0.7,                        // close 70% of the gap
-        );
-        const units = Math.max(0, Math.floor(maxUnits));
-        if (units > 0) {
-          m.inventory[bestSrc][pid] -= units;
-          m.inventory[dst][pid]    += units;
-          // Record the transfer so the World view can render directional flows.
-          if (!state.tradeFlows) state.tradeFlows = [];
-          state.tradeFlows.push({
-            day: state.time.totalDays,
-            src: bestSrc, dst, pid, units,
-          });
-        }
-      }
-    }
-  }
+  // Cross-country movement of goods is now handled by Exporters.js (agent-
+  // driven shipping with transit delays). `state.tradeFlows` gets populated
+  // when an exporter cargo settles in its destination, not from a magic loop
+  // here.
 
   // Per-country price update via stock gap. Also applies saturation pressure: when
   // a country's market has been unable to absorb production, local price drifts down
@@ -214,6 +187,14 @@ export function tickMarket(state) {
 
   // Inflation index update (after prices settle for the day).
   tickPriceIndex(state);
+
+  // Record the day's market snapshot for the debug CSV export. Runs LAST so
+  // every field (price, marketStock, supplyToday, consumptionDay, priceIndex,
+  // wageRate) is fully settled. After this, supplyToday is safe to reset.
+  recordMarketSnapshot(state);
+
+  // Reset supplyToday for the next day's external producers to push into.
+  for (const cid of COUNTRY_IDS) state.countries[cid].supplyToday = {};
 }
 
 // =============================================================================
@@ -243,13 +224,85 @@ export function priceMA(state, producibleId, countryId, days = 30) {
   return slice.reduce((s, x) => s + x, 0) / slice.length;
 }
 
-export function inventoryOf(state, ownerId, producibleId) {
+// === Inventory helpers — used by EVERY wallet (player, AI farmer, exporter)
+// so AI and player share one code path. SOLID: single source of truth for
+// inventory access; adding a new actor type doesn't require new helpers.
+//
+// Wallets store inventory as `wallet.inventoryByCountry[cid][pid]`. Goods
+// physically live in a country and can't teleport — AI is tied to its country
+// so only one slot is ever used; the player can hold inventory in any country
+// they've bought into.
+
+// Returns the per-country inventory dict, auto-creating the country slot.
+export function inventoryFor(wallet, cid) {
+  if (!wallet) return {};
+  if (!wallet.inventoryByCountry) wallet.inventoryByCountry = {};
+  if (!wallet.inventoryByCountry[cid]) wallet.inventoryByCountry[cid] = {};
+  return wallet.inventoryByCountry[cid];
+}
+
+// Sum a producible's qty across every country slot. Used for storage billing
+// and "total holdings" displays.
+export function totalInventoryOf(wallet, producibleId) {
+  if (!wallet?.inventoryByCountry) return 0;
+  let total = 0;
+  for (const c of Object.values(wallet.inventoryByCountry)) {
+    total += c[producibleId] || 0;
+  }
+  return total;
+}
+
+// Total units (any producible) held by a wallet — sums across the whole
+// inventoryByCountry. Storage uses this to bill per-month warehouse labor.
+export function totalUnitsOf(wallet) {
+  if (!wallet?.inventoryByCountry) return 0;
+  let total = 0;
+  for (const c of Object.values(wallet.inventoryByCountry)) {
+    for (const q of Object.values(c)) total += Math.max(0, q);
+  }
+  return total;
+}
+
+// Per-country units total — used by per-country storage cost calculation.
+export function unitsInCountry(wallet, cid) {
+  const dict = wallet?.inventoryByCountry?.[cid];
+  if (!dict) return 0;
+  let total = 0;
+  for (const q of Object.values(dict)) total += Math.max(0, q);
+  return total;
+}
+
+// Backwards-compat / convenience getter. If `cid` is omitted returns the
+// total across countries (legacy semantic for player); otherwise the per-cid
+// qty. AI callers pass the AI's countryId.
+export function inventoryOf(state, ownerId, producibleId, cid = null) {
   const wallet = walletOf(state, ownerId);
-  return wallet?.inventory?.[producibleId] ?? 0;
+  if (!wallet) return 0;
+  if (cid) return wallet.inventoryByCountry?.[cid]?.[producibleId] ?? 0;
+  return totalInventoryOf(wallet, producibleId);
 }
 
 export function marketInventoryOf(state, producibleId, countryId = PLAYER_COUNTRY_ID) {
   return state.market.inventory?.[countryId]?.[producibleId] ?? 0;
+}
+
+// Total off-market stock of `producibleId` held in `countryId` across EVERY
+// wallet — player, AI farmers, exporters. Used by:
+//   - the Market modal "Off" column (instead of the old AI-only helper)
+//   - the MarketHistory snapshot recorder (one source of truth)
+// Both consumers see the same number — no chance of UI showing X while CSV
+// records Y. New wallet types (banks, gov, etc.) get included for free as
+// long as they register in state.wallets.
+export function offMarketInventoryFor(state, countryId, producibleId) {
+  let total = 0;
+  total += state.player?.inventoryByCountry?.[countryId]?.[producibleId] ?? 0;
+  for (const ai of state.aiFarmers ?? []) {
+    total += ai.inventoryByCountry?.[countryId]?.[producibleId] ?? 0;
+  }
+  for (const exp of state.exporters ?? []) {
+    total += exp.inventoryByCountry?.[countryId]?.[producibleId] ?? 0;
+  }
+  return total;
 }
 
 // Sum trade flows in the last `days` from src→dst. If `producibleId` is null,
@@ -283,26 +336,28 @@ export function sellToMarket(state, producibleId, units, countryId = PLAYER_COUN
   return Math.round(price * units);
 }
 
-export function harvestToInventory(state, ownerId, producibleId, units) {
+// Deposit a harvest into the wallet's per-country inventory. Goods physically
+// live where they were produced — cross-country movement requires an exporter.
+export function harvestToInventory(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
   const wallet = walletOf(state, ownerId);
   if (!wallet) return 0;
-  if (!wallet.inventory) wallet.inventory = {};
-  wallet.inventory[producibleId] = (wallet.inventory[producibleId] || 0) + units;
+  const inv = inventoryFor(wallet, countryId);
+  inv[producibleId] = (inv[producibleId] || 0) + units;
   return units;
 }
 
 export function sellFromInventory(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
   const wallet = walletOf(state, ownerId);
-  if (!wallet || !wallet.inventory) return { ok: false, reason: 'No inventory' };
-  const have = wallet.inventory[producibleId] || 0;
+  if (!wallet) return { ok: false, reason: 'No wallet' };
+  const inv = inventoryFor(wallet, countryId);
+  const have = inv[producibleId] || 0;
   const sell = Math.min(Math.floor(units), have);
-  if (sell <= 0) return { ok: false, reason: 'Nothing to sell' };
+  if (sell <= 0) return { ok: false, reason: 'Nothing to sell here' };
   const price = state.market.prices?.[countryId]?.[producibleId] || 0;
   if (price <= 0) return { ok: false, reason: 'No market price' };
-  // Player sells via the local market: 'b2b' (seller is a producer, buyer is the abstract market)
   const r = executeTransaction(state, {
     sellerId: ownerId,
-    buyerId: 'foreign',                  // generic market sink
+    buyerId: 'foreign',
     productId: producibleId,
     units: sell,
     unitPrice: price,
@@ -311,8 +366,7 @@ export function sellFromInventory(state, ownerId, producibleId, units, countryId
     type: 'b2b',
   });
   if (!r.ok) return { ok: false, reason: r.reason };
-  wallet.inventory[producibleId] = have - sell;
-  // Inject supply into country pool so price reacts on next tick
+  inv[producibleId] = have - sell;
   const country = state.countries[countryId];
   if (country) country.supplyToday[producibleId] = (country.supplyToday[producibleId] || 0) + sell;
   return { ok: true, units: sell, revenue: r.netToSeller, price };
@@ -321,13 +375,10 @@ export function sellFromInventory(state, ownerId, producibleId, units, countryId
 export function buyFromGlobal(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
   const wallet = walletOf(state, ownerId);
   if (!wallet) return { ok: false, reason: 'Wallet missing' };
-  if (!wallet.inventory) wallet.inventory = {};
   const stock = state.market.inventory?.[countryId]?.[producibleId] || 0;
   const buy = Math.min(Math.floor(units), stock);
   if (buy <= 0) return { ok: false, reason: 'Out of stock' };
   const price = state.market.prices?.[countryId]?.[producibleId] || 0;
-  // Buyer pays sale + tax via executeTransaction (player buying off market = sale)
-  const sellerCountry = countryId;
   const isImport = ownerId !== 'foreign' && countryId !== PLAYER_COUNTRY_ID;
   const r = executeTransaction(state, {
     sellerId: 'foreign',
@@ -336,12 +387,13 @@ export function buyFromGlobal(state, ownerId, producibleId, units, countryId = P
     units: buy,
     unitPrice: price,
     countryOfTransaction: countryId,
-    sellerCountryId: sellerCountry,
+    sellerCountryId: countryId,
     type: isImport ? 'import' : 'sale',
   });
   if (!r.ok) return { ok: false, reason: r.reason };
   state.market.inventory[countryId][producibleId] -= buy;
-  wallet.inventory[producibleId] = (wallet.inventory[producibleId] || 0) + buy;
+  const inv = inventoryFor(wallet, countryId);
+  inv[producibleId] = (inv[producibleId] || 0) + buy;
   return { ok: true, units: buy, cost: r.grossRevenue + r.taxPaid + r.transportPaid, price };
 }
 

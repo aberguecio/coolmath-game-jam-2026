@@ -9,8 +9,7 @@
 import { INDUSTRIES } from '../data/industries.js';
 import { INDUSTRY, AI as AI_TUN } from '../data/tunables.js';
 import { pushLog, pushAIDecision, getHaloTileIds } from '../state/GameState.js';
-import { priceMA } from './Market.js';
-import { executeTransaction } from './Transactions.js';
+import { priceMA, inventoryFor, buyFromGlobal, sellFromInventory } from './Market.js';
 import { effectiveSalary, effectiveBuildCost } from './Inflation.js';
 import { applyForLoan } from './Bank.js';
 import { buildIndustry } from './Industries.js';
@@ -75,18 +74,19 @@ export function aiTryBuildIndustry(state, ai) {
 }
 
 // Monthly: AI tops up industry inputs from local market (target = 10 cycles).
+// Uses the same buyFromGlobal rail as the player — single code path.
 export function aiTopUpIndustryInputs(state, ai) {
   const owned = state.industries.filter(
     i => i.ownerId === ai.id && (i.status === 'operational' || i.status === 'idle'),
   );
   if (owned.length === 0) return;
-  if (!ai.inventory) ai.inventory = {};
   const cid = ai.countryId;
+  const inv = inventoryFor(ai, cid);
   for (const ind of owned) {
     const recipe = INDUSTRIES[ind.recipeId];
     if (!recipe) continue;
     for (const [pid, qty] of Object.entries(recipe.inputs)) {
-      const have = ai.inventory[pid] || 0;
+      const have = inv[pid] || 0;
       const target = qty * 10;
       if (have >= target) continue;
       const need = target - have;
@@ -94,47 +94,30 @@ export function aiTopUpIndustryInputs(state, ai) {
       if (stock <= 0) continue;
       const price = state.market.prices?.[cid]?.[pid] || 0;
       if (price <= 0) continue;
-      const affordable = ai.cash / price;
-      const buy = Math.floor(Math.min(need, stock, affordable));
+      const buy = Math.floor(Math.min(need, stock, ai.cash / price));
       if (buy <= 0) continue;
-      const r = executeTransaction(state, {
-        sellerId: 'foreign', buyerId: ai.id,
-        productId: pid, units: buy, unitPrice: price,
-        countryOfTransaction: cid, sellerCountryId: cid, type: 'b2b',
-      });
-      if (r.ok) {
-        state.market.inventory[cid][pid] -= buy;
-        ai.inventory[pid] = have + buy;
-      }
+      buyFromGlobal(state, ai.id, pid, buy, cid);
     }
   }
 }
 
 // Monthly: AI sells finished output stock back to the local market.
+// Keeps a safety buffer of 5 cycles' worth so the next production tick has
+// something to fall back on if a sale temporarily fails. Routes through the
+// same sellFromInventory rail as the player.
 export function aiSellIndustryOutputs(state, ai) {
-  if (!ai.inventory) return;
+  const cid = ai.countryId;
+  const inv = inventoryFor(ai, cid);
   for (const ind of state.industries) {
     if (ind.ownerId !== ai.id) continue;
     if (ind.status === 'closed' || ind.status === 'building') continue;
     const recipe = INDUSTRIES[ind.recipeId];
     if (!recipe) continue;
-    const cid = ai.countryId;
     for (const pid of Object.keys(recipe.outputs)) {
-      const have = ai.inventory[pid] || 0;
+      const have = inv[pid] || 0;
       const sell = Math.max(0, Math.floor(have - recipe.outputs[pid] * 5));
       if (sell <= 0) continue;
-      const price = state.market.prices?.[cid]?.[pid] || 0;
-      if (price <= 0) continue;
-      const r = executeTransaction(state, {
-        sellerId: ai.id, buyerId: 'foreign',
-        productId: pid, units: sell, unitPrice: price,
-        countryOfTransaction: cid, sellerCountryId: cid, type: 'b2b',
-      });
-      if (r.ok) {
-        ai.inventory[pid] -= sell;
-        const country = state.countries[cid];
-        if (country) country.supplyToday[pid] = (country.supplyToday[pid] || 0) + sell;
-      }
+      sellFromInventory(state, ai.id, pid, sell, cid);
     }
   }
 }

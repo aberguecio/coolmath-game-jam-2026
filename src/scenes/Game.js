@@ -15,6 +15,7 @@ import {
   sellFromInventory, buyFromGlobal, inventoryOf,
   effectiveProductionFor, elasticityFor, elasticityTargetFor,
   populationSpend, marketInventoryOf, tradeFlowVolume,
+  offMarketInventoryFor,
 } from '../systems/Market.js';
 import {
   tickIndustries, tickIndustrySalaries, tickFiscalCrisis, seedIndustries,
@@ -31,7 +32,9 @@ import {
 } from '../systems/Inflation.js';
 import { tickLaborMarket, wageRateFor } from '../systems/Labor.js';
 import { tickStorageCost, storageBillFor } from '../systems/Storage.js';
-import { INDUSTRY } from '../data/tunables.js';
+import { tickExporters } from '../systems/Exporters.js';
+import { aiExporterTryShipment } from '../systems/ExporterAI.js';
+import { INDUSTRY, EXPORTERS } from '../data/tunables.js';
 import {
   surveyTile, mineralRichness, canMineHere, tickMiningOps,
   closeMine, reopenMine,
@@ -51,6 +54,7 @@ import { tickEvents } from '../systems/Events.js';
 import { LOAN_PRODUCTS, LOAN_PRODUCT_LIST, resolveMaxPrincipal } from '../data/loanProducts.js';
 import { startMusic, toggleMute, isMusicMuted } from '../systems/Music.js';
 import { play as playSfx } from '../systems/Sfx.js';
+import { downloadCSV } from '../util/csv.js';
 
 const MAP_OFFSET_X = 10;
 const MAP_OFFSET_Y = 50;
@@ -126,6 +130,7 @@ export class Game extends Phaser.Scene {
     this.buildPriceChartModal();
     this.buildEventsModal();
     this.buildCompaniesModal();
+    this.buildExportersModal();
     this.buildWorldModal();
     this.buildTutorialOverlay();
     this.offerMarkers = [];
@@ -148,6 +153,7 @@ export class Game extends Phaser.Scene {
       if (this.state.ui.marketOpen) { this.toggleMarket(false); return; }
       if (this.state.ui.eventsOpen) { this.toggleEvents(false); return; }
       if (this.state.ui.companiesOpen) { this.toggleCompanies(false); return; }
+      if (this.state.ui.exportersOpen) { this.toggleExporters(false); return; }
       if (this.state.ui.worldOpen) { this.toggleWorld(false); return; }
       if (this.state.ui.countryChartOpen) { this.closeCountryChart(); return; }
       if (this.state.ui.bankOpen) { this.toggleBank(false); return; }
@@ -449,6 +455,11 @@ export class Game extends Phaser.Scene {
     const companiesX = place(ICON_W);
     this.companiesBtn = this.makeIconButton(companiesX, ICON_W, '🏭', 0xc792ea, 0xd9b3f0,
       () => this.toggleCompanies(true), 'Companies');
+
+    // EXPORTERS
+    const exportersX = place(ICON_W);
+    this.exportersBtn = this.makeIconButton(exportersX, ICON_W, '🚢', 0x88c8ff, 0xa8d8ff,
+      () => this.toggleExporters(true), 'Exporters');
 
     // Music — small grey icon at the leftmost slot
     const musicX = place(28);
@@ -1034,6 +1045,26 @@ export class Game extends Phaser.Scene {
     this.infoGroup.setVisible(true);
   }
 
+  // Compact [i] icon. Click → opens the global info popover with `text`.
+  // Returns the two gameobjects (bg, txt) so callers can track them for
+  // cleanup. `parentGroup` is the container the icon belongs to (so it
+  // inherits visibility / depth). `x,y` is the top-left of the icon.
+  addInfoIcon(parentGroup, trackArr, x, y, text, depth = 58) {
+    const size = 12;
+    const bg = this.add.rectangle(x, y, size, size, 0x243345)
+      .setOrigin(0, 0).setStrokeStyle(1, 0x6ee7b7)
+      .setInteractive({ useHandCursor: true }).setDepth(depth);
+    const txt = this.add.text(x + size / 2, y + size / 2, 'i', {
+      fontFamily: 'monospace', fontSize: '9px', color: '#6ee7b7', fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(depth + 1);
+    bg.on('pointerover', () => bg.setFillStyle(0x3a4d63));
+    bg.on('pointerout', () => bg.setFillStyle(0x243345));
+    bg.on('pointerdown', () => this.showInfo(text));
+    parentGroup.add(bg); parentGroup.add(txt);
+    trackArr.push(bg, txt);
+    return { bg, txt };
+  }
+
   // -----------------------------------------------------------------------
   // COUNTRY CHART MODAL
   // -----------------------------------------------------------------------
@@ -1221,29 +1252,143 @@ export class Game extends Phaser.Scene {
 
     // Section header
     ls(colA, infoTop, '── DEMOGRAPHICS ──', '#7a8694', '10px');
-    ls(colA, infoTop + lineH * 1, `Population: ${Math.round(run.population)} people`);
-    ls(colA, infoTop + lineH * 2, `Labor supply: ${supply}`, '#9aa4ad');
-    ls(colA, infoTop + lineH * 3, `Labor demand: ${demand}`, '#9aa4ad');
-    ls(colA, infoTop + lineH * 4, `Wage: $${wage}/mo·worker  (×${tightnessStr})`,
-       tightnessVal > 1.5 ? '#ff8c8c' : tightnessVal < 0.5 ? '#8cffaa' : '#cdd6df');
+
+    // Row helper: prints the label text and an [i] icon to its right with the
+    // given explanation. Keeps the demographics/economy block readable and
+    // teaches the player what each economic knob actually does.
+    const colWidth = w / 2 - 26;
+    const iconGap = 4;
+    const rowWithInfo = (cx, cy, str, color, infoText) => {
+      const t = this.add.text(cx, cy, str, {
+        fontFamily: 'monospace', fontSize: '11px', color: color ?? '#cdd6df',
+      }).setDepth(57);
+      this.chartGroup.add(t); this.chartLabels.push(t);
+      const iconX = cx + colWidth - 12 - iconGap;
+      this.addInfoIcon(this.chartGroup, this.chartLabels, iconX, cy + 1, infoText, 57);
+    };
+
+    rowWithInfo(colA, infoTop + lineH * 1,
+      `Population: ${Math.round(run.population)} people`, '#cdd6df',
+      'POPULATION\n\n' +
+      'How many people live in this town. Grows each year at the region\'s rate (with noise).\n\n' +
+      'Affects:\n' +
+      '• Labor supply (= population × 0.5)\n' +
+      '• Daily food consumption (consumption × pop ratio)\n' +
+      '• Tax base (more buyers = more sale tax)\n\n' +
+      'Affected by: yearly growth and events that scale population.');
+
+    rowWithInfo(colA, infoTop + lineH * 2,
+      `Labor supply: ${supply}`, '#9aa4ad',
+      'LABOR SUPPLY\n\n' +
+      'Workers available in this town.\n\n' +
+      'Formula: population × WAGES.workersPerPopUnit (0.5).\n\n' +
+      'The "supply side" of the labor market — together with labor demand it sets the tightness, and tightness drives the wage.\n\n' +
+      'Affected by: population changes (yearly growth, events).');
+
+    rowWithInfo(colA, infoTop + lineH * 3,
+      `Labor demand: ${demand}`, '#9aa4ad',
+      'LABOR DEMAND\n\n' +
+      'Active jobs in this town.\n\n' +
+      'Sum of:\n' +
+      '• workforce of every operational or idle industry (not closed)\n' +
+      '• monthlyLabor for each active mining tile\n' +
+      '• 1 worker per crop tile in cultivation (any crop, same cost)\n\n' +
+      'Goes up when building industries / mines / planting tiles. Drops when they close or go fallow.');
+
+    rowWithInfo(colA, infoTop + lineH * 4,
+      `Wage: $${wage}/mo·worker  (×${tightnessStr})`,
+      tightnessVal > 1.5 ? '#ff8c8c' : tightnessVal < 0.5 ? '#8cffaa' : '#cdd6df',
+      'WAGE (market wage)\n\n' +
+      'Emergent wage from the town\'s labor market. Cost of 1 worker per month.\n\n' +
+      'Formula: target = WAGES.baseWage (50) × √(demand / supply).\n' +
+      'actual wage = 60-day EMA of target (smooths spikes).\n\n' +
+      '×tightness is the current pressure = √(demand/supply). >1 = tight market (wage rising). <1 = labor surplus (wage falling).\n\n' +
+      'Affects EVERY labor cost:\n' +
+      '• Industry monthly salaries (workforce × wage)\n' +
+      '• Crop harvest cost (harvestLabor × wage)\n' +
+      '• Mine monthly op cost\n' +
+      '• Plow / survey / storage costs\n\n' +
+      'NOT multiplied by priceIndex — wage is independent of cost-of-living.');
 
     ls(colB, infoTop, '── ECONOMY ──', '#7a8694', '10px');
-    ls(colB, infoTop + lineH * 1, `Wage fund: $${wf.toLocaleString()}`);
-    ls(colB, infoTop + lineH * 2, `Treasury: $${tr.toLocaleString()}${crisis}`,
-       tr < 0 ? '#ff7a7a' : '#cdd6df');
-    ls(colB, infoTop + lineH * 3, `Market pool: $${mp.toLocaleString()}`);
-    ls(colB, infoTop + lineH * 4, `priceIndex: ${pi} (${piSign}${piPct}%)`,
-       Math.abs(piPct) > 30 ? '#ff8c8c' : '#cdd6df');
+
+    rowWithInfo(colB, infoTop + lineH * 1,
+      `Wage fund: $${wf.toLocaleString()}`, '#cdd6df',
+      'WAGE FUND\n\n' +
+      'The town\'s accumulated wage pot. This is the cash population has available to spend on food.\n\n' +
+      'Money flows in from:\n' +
+      '• Industries paying monthly salaries\n' +
+      '• Harvest cost / plow / survey / storage cost\n' +
+      '• Welfare top-up from treasury when it falls below floor\n\n' +
+      'Money flows out to:\n' +
+      '• Population buying food daily (goes to marketPool)\n\n' +
+      'If it drops under the floor (10 days × nutritional demand), treasury refills the gap.');
+
+    rowWithInfo(colB, infoTop + lineH * 2,
+      `Treasury: $${tr.toLocaleString()}${crisis}`, tr < 0 ? '#ff7a7a' : '#cdd6df',
+      'TREASURY\n\n' +
+      'The town government\'s cash reserves.\n\n' +
+      'Money flows in from:\n' +
+      '• Sale tax (population buying)\n' +
+      '• B2B tax (company-to-company purchases)\n' +
+      '• Import tax (exporters selling from abroad)\n\n' +
+      'Money flows out to:\n' +
+      '• Welfare top-up to wageFund when needed\n' +
+      '• Subsidies during fiscal crisis\n\n' +
+      'If it stays deeply negative → fiscal crisis (wage haircut on salary deposits, preference crush on premium foods).');
+
+    rowWithInfo(colB, infoTop + lineH * 3,
+      `Market pool: $${mp.toLocaleString()}`, '#cdd6df',
+      'MARKET POOL\n\n' +
+      'Cash pool of the town\'s wholesale market. Acts as the invisible middleman between producers and consumers.\n\n' +
+      'Money flows in from:\n' +
+      '• Population buying from market\n' +
+      '• Exporters unloading cargo here\n\n' +
+      'Money flows out to:\n' +
+      '• Player / AI / exporters selling into market\n\n' +
+      'If it dries up: sales into this pool fail (saturatedDays rises → prices drift down). Exporters either fire-sale or dump cargo for free when the pool hits 0.');
+
+    rowWithInfo(colB, infoTop + lineH * 4,
+      `priceIndex: ${pi} (${piSign}${piPct}%)`, Math.abs(piPct) > 30 ? '#ff8c8c' : '#cdd6df',
+      'PRICE INDEX (cost-of-living)\n\n' +
+      'Index of the town\'s average basket price vs its base level. 1.00 = baseline. 1.20 = 20% more expensive than start.\n\n' +
+      'Computed as: EMA of current basket prices / base basket prices.\n\n' +
+      'Affects:\n' +
+      '• Industry build cost\n' +
+      '• tilePrice (buying land)\n' +
+      '• Plow / survey / setup cost (the commodity portion)\n\n' +
+      'Does NOT affect wage (which comes from the labor market, not the basket).');
 
     // Ventures row
     const venturesY = infoTop + lineH * 6;
     ls(colA, venturesY, '── VENTURES ──', '#7a8694', '10px');
-    ls(colA, venturesY + lineH * 1,
-       `🏭 Industries: ${nIndustryOp} op · ${nIndustryIdle} idle · ${nIndustryBuilding} bld · ${nIndustryClosed} closed`);
-    ls(colA, venturesY + lineH * 2,
-       `⛏ Mines: ${nMineActive} active · ${nMineClosed} closed`);
-    ls(colA, venturesY + lineH * 3,
-       `🌾 Crop tiles: ${nCropActive} growing · ${nCropFallow} fallow/plowed`);
+
+    rowWithInfo(colA, venturesY + lineH * 1,
+      `🏭 Industries: ${nIndustryOp} op · ${nIndustryIdle} idle · ${nIndustryBuilding} bld · ${nIndustryClosed} closed`,
+      '#cdd6df',
+      'INDUSTRIES (factories on halo tiles)\n\n' +
+      '• op (operational): producing every cycleDays, pays salaries monthly\n' +
+      '• idle: missing inputs to run; still pays salaries\n' +
+      '• bld (building): under construction, not producing yet\n' +
+      '• closed: shut down by decision or by inability to pay salary\n\n' +
+      'Every industry adds its `workforce` count to the town\'s labor demand.\n\n' +
+      'AI opens/closes based on 30-90 day ROI. A closed industry with good margins can reopen (at a discount vs full build cost).');
+
+    rowWithInfo(colA, venturesY + lineH * 2,
+      `⛏ Mines: ${nMineActive} active · ${nMineClosed} closed`, '#cdd6df',
+      'MINES\n\n' +
+      'Active mining tiles for copper / iron / gold.\n\n' +
+      '• active: produce yield every growthDays and pay monthlyLabor (1 worker × wage)\n' +
+      '• closed: shut down by AI/player; no production or labor cost, but the tile keeps its "mining" lockType\n\n' +
+      'Each active mine adds 1 worker to labor demand. Setup cost = setupLabor × wage (high: 50-180 worker-months).');
+
+    rowWithInfo(colA, venturesY + lineH * 3,
+      `🌾 Crop tiles: ${nCropActive} growing · ${nCropFallow} fallow/plowed`, '#cdd6df',
+      'CROP TILES\n\n' +
+      '• growing: planted or mature, in mid-cycle. Add 1 worker to labor demand.\n' +
+      '• fallow / plowed: no active crop. No labor cost but may retain a "crop" lockType if previously cultivated.\n\n' +
+      'Plant setup cost = setupLabor × wage + 0.1 × product market price (seed).\n' +
+      'Harvest cost = harvestLabor × wage. Yield depends on tile.quality.');
 
     // ============================================================
     // MARKET TABLE — scrollable
@@ -1560,6 +1705,7 @@ export class Game extends Phaser.Scene {
     if (this.state.ui.priceChartOpen) this.refreshPriceChartModal();
     if (this.state.ui.eventsOpen) this.refreshEventsModal();
     if (this.state.ui.companiesOpen) this.refreshCompaniesModal();
+    if (this.state.ui.exportersOpen) this.refreshExportersModal();
     if (this.state.ui.worldOpen) this.refreshWorldModal();
     this.refreshTutorial();
   }
@@ -1574,6 +1720,14 @@ export class Game extends Phaser.Scene {
       tickMarket(this.state);           // 4: per-country supply/demand + cross-country trade + prices
       populationSpend(this.state);      // 5: country wage funds buy food (via executeTransaction)
       tickAI(this.state);               // 7: AI daily decisions (tickWages welfare baked into populationSpend)
+      // 7b: Exporters — advance in-flight cargos, settle arrivals, and let
+      // AI exporters consider new trips (after settlement so cash is fresh).
+      tickExporters(this.state);
+      for (const exp of this.state.exporters || []) {
+        if (!exp.bankrupt && exp.ownerId !== 'player') {
+          aiExporterTryShipment(this.state, exp);
+        }
+      }
     }
     if (events.month) {
       tickIndustrySalaries(this.state); // 8: industries pay salaries
@@ -1639,6 +1793,23 @@ export class Game extends Phaser.Scene {
     this.marketGroup.add(closeBtn);
     this.marketGroup.add(closeTxt);
 
+    // CSV export — dumps every (day × country × product) snapshot the
+    // simulation has recorded so the user can hand the file back for AI
+    // debugging. Lives next to the close button (static title bar).
+    const csvW = 96;
+    const csvBg = this.add.rectangle(x + w - 36 - csvW - 6, y + 14, csvW, 24, 0x2a4a30)
+      .setOrigin(0, 0).setStrokeStyle(1, 0x6ee7b7)
+      .setInteractive({ useHandCursor: true });
+    const csvTxt = this.add.text(x + w - 36 - csvW - 6 + csvW / 2, y + 14 + 12,
+      '⬇ Market CSV', {
+        fontFamily: 'monospace', fontSize: '11px', color: '#6ee7b7', fontStyle: 'bold',
+      }).setOrigin(0.5);
+    csvBg.on('pointerover', () => csvBg.setFillStyle(0x3a6a40));
+    csvBg.on('pointerout', () => csvBg.setFillStyle(0x2a4a30));
+    csvBg.on('pointerdown', () => this.exportMarketHistoryCSV());
+    this.marketGroup.add(csvBg);
+    this.marketGroup.add(csvTxt);
+
     // Vertical layout anchors:
     //   y+44   country tabs row (28h)
     //   y+78   header columns (16h)
@@ -1681,15 +1852,14 @@ export class Game extends Phaser.Scene {
     this.refreshTopBar();
   }
 
-  // Sum of inventory across all AI farmers in this country for this producible.
-  // Player inventory is shown separately ("You") so we exclude it here.
+  // Off-market stock held in `cid` by AI farmers + exporters (everyone except
+  // the player — that column is rendered separately as "You"). Built on top
+  // of the shared `offMarketInventoryFor` in Market.js to keep one source of
+  // truth: market snapshot CSV and UI count the same wallets.
   offMarketInventoryFor(state, cid, pid) {
-    let total = 0;
-    for (const ai of state.aiFarmers || []) {
-      if (ai.countryId !== cid) continue;
-      total += ai.inventory?.[pid] || 0;
-    }
-    return Math.round(total);
+    const total = offMarketInventoryFor(state, cid, pid);
+    const player = state.player?.inventoryByCountry?.[cid]?.[pid] ?? 0;
+    return Math.round(total - player);
   }
 
   refreshMarketModal() {
@@ -1791,7 +1961,9 @@ export class Game extends Phaser.Scene {
 
       const stock = Math.round(s.market.inventory?.[cid]?.[def.id] || 0);
       const offMkt = this.offMarketInventoryFor(s, cid, def.id);
-      const yours = Math.round(inventoryOf(s, 'player', def.id));
+      // Per-country inventory: player only sees what they hold IN THIS town.
+      // Cross-country movement requires founding an exporter (future feature).
+      const yours = Math.round(inventoryOf(s, 'player', def.id, cid));
       const stockTxt = this.add.text(x + 295, midY, `${stock}u`, {
         fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
       }).setOrigin(0, 0.5).setDepth(57);
@@ -2044,6 +2216,8 @@ export class Game extends Phaser.Scene {
       { label: '3M',  days: 90 },
       { label: '6M',  days: 180 },
       { label: '1Y',  days: 365 },
+      { label: '3Y',  days: 365 * 3 },
+      { label: '5Y',  days: 365 * 5 },
       { label: 'All', days: Infinity },
     ];
     const pillsY = contentTop;
@@ -2186,27 +2360,44 @@ export class Game extends Phaser.Scene {
   }
 
   // -----------------------------------------------------------------------
-  // EVENTS MODAL — scrollable history of all past events
+  // EVENTS MODAL — tiered history with filters and CSV export (Sprint D)
   // -----------------------------------------------------------------------
   buildEventsModal() {
     const frame = this.makeModalFrame({
-      w: 620, h: 480, title: '⚡  EVENTS HISTORY', color: 0xf7c948,
+      w: 760, h: 540, title: '⚡  EVENTS HISTORY', color: 0xf7c948,
       onClose: () => this.toggleEvents(false),
     });
     this.eventsFrame = frame;
     this.eventsDynamicNodes = [];
 
-    // Scroll-bind on the card
-    const card = frame.group.list[1]; // backdrop=0, card=1
+    const card = frame.group.list[1];
     this.bindWheelScroll(card, 'events',
       () => this.computeEventsMaxScroll(),
       () => this.refreshEventsModal());
   }
 
+  // Apply current UI filters and return the filtered slice (newest first).
+  filteredEvents() {
+    const s = this.state;
+    if (!s.ui.eventsTiers) s.ui.eventsTiers = new Set([1, 2]);
+    const tiers = s.ui.eventsTiers;
+    const cid = s.ui.eventsCountryFilter || null;
+    const hist = s.eventHistory || [];
+    const out = [];
+    for (let i = hist.length - 1; i >= 0; i--) {
+      const e = hist[i];
+      if (!tiers.has(e.tier)) continue;
+      if (cid && e.countryId && e.countryId !== cid) continue;
+      if (cid && !e.countryId) continue;
+      out.push(e);
+    }
+    return out;
+  }
+
   computeEventsMaxScroll() {
-    const rows = (this.state.eventHistory?.length || 0) + (this.state.activeEvents?.length || 0);
-    const rowH = 30;
-    const visibleH = this.eventsFrame.contentBottom - this.eventsFrame.contentTop - 30;
+    const rows = this.filteredEvents().length;
+    const rowH = 36;
+    const visibleH = this.eventsFrame.contentBottom - this.eventsFrame.contentTop - 90;
     return Math.max(0, rows * rowH - visibleH);
   }
 
@@ -2217,76 +2408,317 @@ export class Game extends Phaser.Scene {
     s.ui.eventsOpen = open;
     this.eventsFrame.group.setVisible(open);
     if (open) this.refreshEventsModal();
+    else {
+      // Phaser 3 quirk: setVisible(false) on a container does NOT disable
+      // input on its children. Tear down the dynamic interactive nodes so
+      // hidden tier pills / CSV button / country cycle don't eat clicks
+      // aimed at other modals (e.g. World country circles).
+      for (const n of this.eventsDynamicNodes) n.destroy();
+      this.eventsDynamicNodes = [];
+    }
     this.refreshTopBar();
+  }
+
+  // Dump the full per-day market snapshot for every (country, product) into
+  // a CSV. Designed for AI debugging: the user plays for a while, exports,
+  // and hands the file off. Joins cleanly with events-day*.csv on the `day`
+  // column when cross-referencing AI decisions against price/inventory state.
+  exportMarketHistoryCSV() {
+    const s = this.state;
+    const snapshot = s.market?.snapshot;
+    if (!snapshot) {
+      pushLog(s, 'No market snapshots recorded yet.');
+      return;
+    }
+    const rows = [];
+    for (const cid of COUNTRY_IDS) {
+      const series = snapshot[cid];
+      if (!series) continue;
+      const townName = COUNTRIES[cid]?.name ?? cid;
+      for (const pid of Object.keys(series)) {
+        const productName = PRODUCIBLES[pid]?.name ?? pid;
+        for (const rec of series[pid]) {
+          rows.push([
+            rec.day, townName, productName,
+            rec.price, rec.priceMA30,
+            rec.marketStock, rec.offMarketStock,
+            rec.supplyDay, rec.consumptionDay,
+            rec.priceIndex, rec.wageRate,
+          ]);
+        }
+      }
+    }
+    downloadCSV(
+      `market-history-day${s.time.totalDays}.csv`,
+      ['day', 'country', 'product',
+        'price', 'priceMA30',
+        'marketStock', 'offMarketStock',
+        'supplyDay', 'consumptionDay',
+        'priceIndex', 'wageRate'],
+      rows,
+    );
+    pushLog(s, `Exported ${rows.length} market rows to CSV`);
+  }
+
+  // Trigger a browser download of the currently-filtered event history.
+  // All CSV downloads in this scene route through the shared downloadCSV util
+  // — same escape rules, same Blob/anchor lifecycle, same future bug fixes.
+  exportEventsCSV() {
+    const rows = this.filteredEvents().map(e => [
+      e.day, e.tier, e.countryId ?? '', e.actorName ?? '',
+      e.category ?? '', e.summary ?? '', e.reason ?? '', e.amount ?? '',
+    ]);
+    downloadCSV(
+      `events-day${this.state.time.totalDays}.csv`,
+      ['day', 'tier', 'country', 'actor', 'category', 'summary', 'reason', 'amount'],
+      rows,
+    );
+    pushLog(this.state, `Exported ${rows.length} events to CSV`);
   }
 
   refreshEventsModal() {
     const s = this.state;
+    if (!s.ui.eventsTiers) s.ui.eventsTiers = new Set([1, 2]);
     for (const n of this.eventsDynamicNodes) n.destroy();
     this.eventsDynamicNodes = [];
 
     const { x, w, contentTop, contentBottom } = this.eventsFrame;
-    const subY = contentTop;
-    const sub = this.add.text(x + 18, subY,
-      `${(s.eventHistory?.length || 0)} past · ${(s.activeEvents?.length || 0)} active`, {
-        fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
+
+    // === Row 1: tier pills ===========================================
+    const pillsY = contentTop;
+    const tierMeta = [
+      { tier: 1, label: 'T1 World',    color: 0xf7c948 },
+      { tier: 2, label: 'T2 Strategy', color: 0xc792ea },
+      { tier: 3, label: 'T3 Tactical', color: 0x88c8ff },
+      { tier: 4, label: 'T4 Tx',       color: 0x7a8694 },
+    ];
+    let pillX = x + 14;
+    for (const t of tierMeta) {
+      const active = s.ui.eventsTiers.has(t.tier);
+      const pillW = 92;
+      const bg = this.add.rectangle(pillX, pillsY, pillW, 22,
+        active ? t.color : 0x243345).setOrigin(0, 0).setDepth(58)
+        .setStrokeStyle(1, t.color).setInteractive({ useHandCursor: true });
+      bg.on('pointerdown', () => {
+        if (s.ui.eventsTiers.has(t.tier)) s.ui.eventsTiers.delete(t.tier);
+        else s.ui.eventsTiers.add(t.tier);
+        this.scrollState.events = 0;
+        this.refreshEventsModal();
+      });
+      const txt = this.add.text(pillX + pillW / 2, pillsY + 11, t.label, {
+        fontFamily: 'monospace', fontSize: '11px',
+        color: active ? '#13181f' : '#cdd6df', fontStyle: 'bold',
+      }).setOrigin(0.5).setDepth(59);
+      this.eventsFrame.group.add(bg); this.eventsFrame.group.add(txt);
+      this.eventsDynamicNodes.push(bg, txt);
+      pillX += pillW + 4;
+    }
+
+    // === Row 1 (right): country cycle + CSV =========================
+    const csvW = 70;
+    const csvBg = this.add.rectangle(x + w - 14 - csvW, pillsY, csvW, 22, 0x2a4a30)
+      .setOrigin(0, 0).setDepth(58).setStrokeStyle(1, 0x6ee7b7)
+      .setInteractive({ useHandCursor: true });
+    csvBg.on('pointerdown', () => this.exportEventsCSV());
+    const csvTxt = this.add.text(x + w - 14 - csvW / 2, pillsY + 11, '⬇ CSV', {
+      fontFamily: 'monospace', fontSize: '11px', color: '#6ee7b7', fontStyle: 'bold',
+    }).setOrigin(0.5).setDepth(59);
+    this.eventsFrame.group.add(csvBg); this.eventsFrame.group.add(csvTxt);
+    this.eventsDynamicNodes.push(csvBg, csvTxt);
+
+    const cycleW = 130;
+    const cycleX = x + w - 14 - csvW - 6 - cycleW;
+    const cidNow = s.ui.eventsCountryFilter || null;
+    const cidLabel = cidNow ? (COUNTRIES[cidNow]?.name ?? cidNow) : 'All towns';
+    const cycleBg = this.add.rectangle(cycleX, pillsY, cycleW, 22, 0x243345)
+      .setOrigin(0, 0).setDepth(58).setStrokeStyle(1, 0x88c8ff)
+      .setInteractive({ useHandCursor: true });
+    cycleBg.on('pointerdown', () => {
+      const list = [null, ...COUNTRY_IDS];
+      const idx = list.indexOf(s.ui.eventsCountryFilter ?? null);
+      s.ui.eventsCountryFilter = list[(idx + 1) % list.length];
+      this.scrollState.events = 0;
+      this.refreshEventsModal();
+    });
+    const cycleTxt = this.add.text(cycleX + cycleW / 2, pillsY + 11, `🌍 ${cidLabel}`, {
+      fontFamily: 'monospace', fontSize: '11px', color: '#88c8ff',
+    }).setOrigin(0.5).setDepth(59);
+    this.eventsFrame.group.add(cycleBg); this.eventsFrame.group.add(cycleTxt);
+    this.eventsDynamicNodes.push(cycleBg, cycleTxt);
+
+    // === Row 2: summary count ========================================
+    const total = (s.eventHistory?.length || 0);
+    const rows = this.filteredEvents();
+    const sub = this.add.text(x + 18, pillsY + 30,
+      `Showing ${rows.length} / ${total} (cap ${10000}). Click pills to toggle tiers · 🌍 to filter town.`, {
+        fontFamily: 'monospace', fontSize: '10px', color: '#9aa4ad',
       });
     this.eventsFrame.group.add(sub); this.eventsDynamicNodes.push(sub);
 
-    const rowsTop = subY + 24;
-    const rowH = 30;
+    // === Rows ========================================================
+    const rowsTop = pillsY + 56;
+    const rowH = 36;
     const visibleH = contentBottom - rowsTop;
     const scrollY = (this.scrollState?.events) || 0;
+    const tierColor = { 1: 0xf7c948, 2: 0xc792ea, 3: 0x88c8ff, 4: 0x7a8694 };
 
-    // Combined row list — active first, then history reversed (newest first).
-    const rows = [];
-    for (const e of (s.activeEvents || [])) {
-      const def = EVENT_TYPES[e.type];
-      rows.push({
-        active: true,
-        label: def?.label ?? e.type,
-        appliedDay: e.appliedDay,
-        endedDay: null,
-        country: def?.params?.country ?? null,
-        daysRemaining: e.daysRemaining,
-      });
-    }
-    for (let i = (s.eventHistory?.length || 0) - 1; i >= 0; i--) rows.push(s.eventHistory[i]);
-
-    rows.forEach((row, i) => {
+    rows.forEach((e, i) => {
       const ry = rowsTop + i * rowH - scrollY;
-      if (ry + rowH < rowsTop || ry > contentBottom) return; // clip
+      if (ry + rowH < rowsTop || ry > contentBottom) return;
 
-      const bg = this.add.rectangle(x + 14, ry + 2, w - 28, rowH - 4,
-        row.active ? 0x2a3a4a : 0x1a2434).setOrigin(0, 0).setDepth(57);
+      const bg = this.add.rectangle(x + 14, ry + 2, w - 28, rowH - 4, 0x1a2434)
+        .setOrigin(0, 0).setDepth(57);
       this.eventsFrame.group.add(bg); this.eventsDynamicNodes.push(bg);
 
-      const dot = this.add.circle(x + 26, ry + rowH / 2, 4,
-        row.active ? 0xf7c948 : 0x566370).setDepth(58);
+      const dot = this.add.rectangle(x + 22, ry + 6, 4, rowH - 12,
+        tierColor[e.tier] ?? 0x566370).setOrigin(0, 0).setDepth(58);
       this.eventsFrame.group.add(dot); this.eventsDynamicNodes.push(dot);
 
-      const label = `${row.label}${row.country ? ` (${row.country})` : ''}`;
-      const labelTxt = this.add.text(x + 36, ry + 5, label, {
-        fontFamily: 'monospace', fontSize: '12px',
-        color: row.active ? '#f7c948' : '#cdd6df', fontStyle: row.active ? 'bold' : 'normal',
+      const headBits = [];
+      if (e.countryId) headBits.push(COUNTRIES[e.countryId]?.name ?? e.countryId);
+      if (e.actorName) headBits.push(e.actorName);
+      const head = headBits.length ? `[${headBits.join(' · ')}] ` : '';
+      const summary = this.add.text(x + 34, ry + 4, `${head}${e.summary ?? ''}`, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#e8edf3',
       }).setDepth(58);
-      this.eventsFrame.group.add(labelTxt); this.eventsDynamicNodes.push(labelTxt);
+      this.eventsFrame.group.add(summary); this.eventsDynamicNodes.push(summary);
 
-      const meta = row.active
-        ? `active · ${row.daysRemaining}d left`
-        : `day ${row.appliedDay ?? '?'} → ${row.endedDay}`;
-      const metaTxt = this.add.text(x + w - 22, ry + 8, meta, {
-        fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
+      if (e.reason) {
+        const reasonTxt = this.add.text(x + 34, ry + 19, `↳ ${e.reason}`, {
+          fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
+        }).setDepth(58);
+        this.eventsFrame.group.add(reasonTxt); this.eventsDynamicNodes.push(reasonTxt);
+      }
+
+      const right = `day ${e.day}` + (e.amount != null ? `  ·  $${e.amount}` : '');
+      const rightTxt = this.add.text(x + w - 22, ry + 4, right, {
+        fontFamily: 'monospace', fontSize: '10px', color: '#566370',
       }).setOrigin(1, 0).setDepth(58);
-      this.eventsFrame.group.add(metaTxt); this.eventsDynamicNodes.push(metaTxt);
+      this.eventsFrame.group.add(rightTxt); this.eventsDynamicNodes.push(rightTxt);
     });
 
     if (rows.length === 0) {
-      const empty = this.add.text(x + w / 2, rowsTop + visibleH / 2, 'No events yet', {
-        fontFamily: 'monospace', fontSize: '12px', color: '#566370',
-      }).setOrigin(0.5);
+      const empty = this.add.text(x + w / 2, rowsTop + visibleH / 2,
+        'No events match the current filters.', {
+          fontFamily: 'monospace', fontSize: '12px', color: '#566370',
+        }).setOrigin(0.5);
       this.eventsFrame.group.add(empty); this.eventsDynamicNodes.push(empty);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // EXPORTERS MODAL — every trader, their cash, P&L, and in-flight cargoes
+  // -----------------------------------------------------------------------
+  buildExportersModal() {
+    const frame = this.makeModalFrame({
+      w: 720, h: 500, title: '🚢  EXPORTERS', color: 0x88c8ff,
+      onClose: () => this.toggleExporters(false),
+    });
+    this.exportersFrame = frame;
+    this.exportersDynamicNodes = [];
+    const card = frame.group.list[1];
+    this.bindWheelScroll(card, 'exporters',
+      () => this.computeExportersMaxScroll(),
+      () => this.refreshExportersModal());
+  }
+
+  computeExportersMaxScroll() {
+    const n = (this.state.exporters?.length || 0);
+    const rowH = 90;
+    const visibleH = this.exportersFrame.contentBottom - this.exportersFrame.contentTop - 30;
+    return Math.max(0, n * rowH - visibleH);
+  }
+
+  toggleExporters(open) {
+    const s = this.state;
+    if (open && !s.ui.exportersOpen) this.enterModal();
+    else if (!open && s.ui.exportersOpen) this.exitModal();
+    s.ui.exportersOpen = open;
+    this.exportersFrame.group.setVisible(open);
+    if (open) this.refreshExportersModal();
+    else {
+      for (const n of this.exportersDynamicNodes) n.destroy();
+      this.exportersDynamicNodes = [];
+    }
+    this.refreshTopBar();
+  }
+
+  refreshExportersModal() {
+    const s = this.state;
+    for (const n of this.exportersDynamicNodes) n.destroy();
+    this.exportersDynamicNodes = [];
+
+    const { x, w, contentTop, contentBottom } = this.exportersFrame;
+    const exporters = s.exporters || [];
+
+    const sub = this.add.text(x + 18, contentTop,
+      `${exporters.length} traders · global avg margin ${EXPORTERS.minMarginPct * 100}% threshold`, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
+      });
+    this.exportersFrame.group.add(sub); this.exportersDynamicNodes.push(sub);
+
+    if (exporters.length === 0) {
+      const empty = this.add.text(x + w / 2, (contentTop + contentBottom) / 2,
+        'No exporters yet — seeded at world init.', {
+          fontFamily: 'monospace', fontSize: '12px', color: '#566370',
+        }).setOrigin(0.5);
+      this.exportersFrame.group.add(empty); this.exportersDynamicNodes.push(empty);
+      return;
+    }
+
+    const rowsTop = contentTop + 26;
+    const rowH = 90;
+    const scrollY = (this.scrollState?.exporters) || 0;
+
+    exporters.forEach((exp, i) => {
+      const ry = rowsTop + i * rowH - scrollY;
+      if (ry + rowH < rowsTop || ry > contentBottom) return;
+
+      const bgColor = exp.bankrupt ? 0x3a1a1a : 0x1a2434;
+      const bg = this.add.rectangle(x + 14, ry + 2, w - 28, rowH - 4, bgColor)
+        .setOrigin(0, 0).setStrokeStyle(1, exp.bankrupt ? 0xff7a7a : exp.color)
+        .setDepth(57);
+      this.exportersFrame.group.add(bg); this.exportersDynamicNodes.push(bg);
+
+      // Color flag
+      const flag = this.add.rectangle(x + 22, ry + 8, 6, 24, exp.color).setOrigin(0, 0).setDepth(58);
+      this.exportersFrame.group.add(flag); this.exportersDynamicNodes.push(flag);
+
+      // Header
+      const tag = exp.bankrupt ? ' [BANKRUPT]' : '';
+      const head = `${exp.name}${tag}  ·  home ${COUNTRIES[exp.homeCountryId]?.name ?? exp.homeCountryId}`;
+      const headTxt = this.add.text(x + 36, ry + 4, head, {
+        fontFamily: 'monospace', fontSize: '12px',
+        color: exp.bankrupt ? '#ff7a7a' : '#e8edf3', fontStyle: 'bold',
+      }).setDepth(58);
+      this.exportersFrame.group.add(headTxt); this.exportersDynamicNodes.push(headTxt);
+
+      // Stats line
+      const pnlColor = exp.pnl > 0 ? '#8cffaa' : exp.pnl < 0 ? '#ff8c8c' : '#cdd6df';
+      const stats = `💰 $${Math.round(exp.cash)}    ⚖ P&L $${Math.round(exp.pnl)}    🧭 trips ${exp.tripsCompleted}    🚛 in-flight ${exp.inFlight.length}`;
+      const statsTxt = this.add.text(x + 36, ry + 22, stats, {
+        fontFamily: 'monospace', fontSize: '11px', color: pnlColor,
+      }).setDepth(58);
+      this.exportersFrame.group.add(statsTxt); this.exportersDynamicNodes.push(statsTxt);
+
+      // In-flight cargoes (up to 3 shown)
+      if (exp.inFlight.length > 0) {
+        const cargos = exp.inFlight.slice(0, 3).map(c => {
+          const eta = c.etaDay - s.time.totalDays;
+          return `${c.units}u ${c.pid} ${c.srcCid}→${c.dstCid} ETA ${eta}d`;
+        }).join('  ·  ');
+        const more = exp.inFlight.length > 3 ? `  +${exp.inFlight.length - 3} more` : '';
+        const cargoTxt = this.add.text(x + 36, ry + 42, cargos + more, {
+          fontFamily: 'monospace', fontSize: '10px', color: '#88c8ff',
+        }).setDepth(58);
+        this.exportersFrame.group.add(cargoTxt); this.exportersDynamicNodes.push(cargoTxt);
+      } else if (!exp.bankrupt) {
+        const idleTxt = this.add.text(x + 36, ry + 42, '(scouting for next trip)', {
+          fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
+        }).setDepth(58);
+        this.exportersFrame.group.add(idleTxt); this.exportersDynamicNodes.push(idleTxt);
+      }
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -2319,6 +2751,10 @@ export class Game extends Phaser.Scene {
     s.ui.companiesOpen = open;
     this.companiesFrame.group.setVisible(open);
     if (open) this.refreshCompaniesModal();
+    else {
+      for (const n of this.companiesDynamicNodes) n.destroy();
+      this.companiesDynamicNodes = [];
+    }
     this.refreshTopBar();
   }
 
@@ -2340,13 +2776,25 @@ export class Game extends Phaser.Scene {
 
     // Build company list: player first, then AIs. Capture inventory reference
     // so we can render it inline (stock the company is HOLDING, not selling).
+    // Flatten the wallet's per-country inventory into a single {pid: total}
+    // dict for display purposes. Storage cost is still billed per-country —
+    // this is just the off-market holdings line.
+    const flatten = (byC) => {
+      const out = {};
+      if (!byC) return out;
+      for (const c of Object.values(byC)) {
+        for (const [pid, q] of Object.entries(c)) out[pid] = (out[pid] || 0) + q;
+      }
+      return out;
+    };
     const all = [
       { id: 'player', name: 'YOU (Player)', cash: s.player.cash,
-        countryId: PLAYER_COUNTRY_ID, isPlayer: true, inventory: s.player.inventory },
+        countryId: PLAYER_COUNTRY_ID, isPlayer: true,
+        inventory: flatten(s.player.inventoryByCountry) },
       ...(s.aiFarmers || []).map(a => ({
         id: a.id, name: a.name, cash: a.cash,
         countryId: a.countryId, isPlayer: false, color: a.color,
-        inventory: a.inventory,
+        inventory: flatten(a.inventoryByCountry),
       })),
     ];
 
@@ -2448,6 +2896,13 @@ export class Game extends Phaser.Scene {
     s.ui.worldOpen = open;
     this.worldFrame.group.setVisible(open);
     if (open) this.refreshWorldModal();
+    else {
+      // Destroy interactive children so hidden country circles / chips don't
+      // capture clicks that should hit other modals (e.g. the country chart).
+      for (const n of this.worldDynamicNodes) n.destroy();
+      this.worldDynamicNodes = [];
+      this.worldGfx?.clear();
+    }
     this.refreshTopBar();
   }
 
@@ -2604,6 +3059,45 @@ export class Game extends Phaser.Scene {
         backgroundColor: '#0f1923',
       }).setOrigin(0.5).setDepth(58).setPadding(2, 1, 2, 1);
       this.worldFrame.group.add(distTxt); this.worldDynamicNodes.push(distTxt);
+    }
+
+    // ---- In-flight exporter cargos ----
+    // Dotted lines from src→dst for each cargo currently in transit.
+    // Filtered by the selected producible if one is active.
+    for (const exp of (s.exporters || [])) {
+      for (const cargo of exp.inFlight) {
+        if (selectedPid && cargo.pid !== selectedPid) continue;
+        const a = positions[cargo.srcCid];
+        const b = positions[cargo.dstCid];
+        if (!a || !b) continue;
+        // Progress 0..1: how close to arrival.
+        const dist = DISTANCES[cargo.srcCid]?.[cargo.dstCid] ?? 1;
+        const totalDays = Math.max(1, Math.round(2 * dist));   // EXPORTERS.etaDaysPerDistance × dist
+        const remaining = Math.max(0, cargo.etaDay - s.time.totalDays);
+        const progress = Math.max(0.02, Math.min(0.98, 1 - remaining / totalDays));
+        // Dotted path A → progress point
+        const px = a.x + (b.x - a.x) * progress;
+        const py = a.y + (b.y - a.y) * progress;
+        this.worldGfx.lineStyle(2, exp.color, 0.7);
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        const nx = dx / len, ny = dy / len;
+        // Dotted segments along the route up to the cargo position.
+        const segLen = 6, gap = 4;
+        let dPos = 0;
+        const maxD = Math.sqrt((px - a.x) ** 2 + (py - a.y) ** 2);
+        while (dPos < maxD) {
+          const sx = a.x + nx * dPos;
+          const sy = a.y + ny * dPos;
+          const ex = a.x + nx * Math.min(dPos + segLen, maxD);
+          const ey = a.y + ny * Math.min(dPos + segLen, maxD);
+          this.worldGfx.lineBetween(sx, sy, ex, ey);
+          dPos += segLen + gap;
+        }
+        // Cargo marker
+        this.worldGfx.fillStyle(exp.color, 1);
+        this.worldGfx.fillCircle(px, py, 3);
+      }
     }
 
     // ---- Nodes ----

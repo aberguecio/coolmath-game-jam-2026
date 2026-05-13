@@ -99,6 +99,17 @@ export const LAND_ACTIONS = {
 //   at least this much × labor cost. 1.05 = needs ≥5% margin. Otherwise the
 //   crop is skipped, increments tile.skipStreak, and risks rot if it never
 //   becomes profitable.
+// Exporters — Sprint C. Trader actors that physically move goods between
+// towns. Each shipment takes `etaDaysPerDistance × distance(src,dst)` days.
+// AI exporters only start a trip when expected margin clears `minMarginPct`.
+export const EXPORTERS = {
+  minMarginPct: 0.10,            // (dstPrice - srcPrice - transport) / dstPrice
+  etaDaysPerDistance: 2,         // distance 4 → 8 in-game days transit
+  baseCapital: 5000,             // starting cash per AI exporter at seed
+  maxCapitalPerTripFraction: 0.5, // never tie up more than 50% of cash in one trip
+  perTownCount: 2,               // AI exporters seeded per town at world init
+};
+
 // Storage — Sprint B. Holding inventory costs warehouse labor each month.
 // Charged per unit stored × wageRate(country); flows to country wageFund.
 // Creates an explicit cost of hoarding so AI prefers selling at fair prices

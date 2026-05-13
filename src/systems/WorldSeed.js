@@ -6,8 +6,11 @@
 import { PRODUCIBLES } from '../data/producibles.js';
 import { INDUSTRIES } from '../data/industries.js';
 import { COUNTRY_IDS } from '../data/countries.js';
+import { EXPORTERS } from '../data/tunables.js';
 import { getHaloTileIds } from '../state/GameState.js';
 import { nextIndustryId } from './Industries.js';
+import { seedExportersFor } from './Exporters.js';
+import { inventoryFor } from './Market.js';
 
 function pickWildTileNot(map, predicate) {
   for (const t of map.tiles) {
@@ -81,7 +84,6 @@ export function seedStarterProduction(state) {
       }
 
       if (!owner.ownedTileIds.includes(tile.id)) owner.ownedTileIds.push(tile.id);
-      if (!owner.inventory) owner.inventory = {};
     }
 
     // === 2. One operational factory per recipe per country ===
@@ -121,16 +123,20 @@ export function seedStarterProduction(state) {
       tile.state = 'industry';
       tile.lockType = 'industry';
       if (!owner.ownedTileIds.includes(tile.id)) owner.ownedTileIds.push(tile.id);
-      if (!owner.inventory) owner.inventory = {};
       // ~30 cycles of inputs and a small output buffer. Topup runs monthly
-      // afterwards (aiTopUpIndustryInputs).
+      // afterwards (aiTopUpIndustryInputs). Inventory lives in the country
+      // where the factory operates.
+      const inv = inventoryFor(owner, cid);
       for (const [pid, qty] of Object.entries(recipe.inputs)) {
-        owner.inventory[pid] = (owner.inventory[pid] || 0) + qty * 30;
+        inv[pid] = (inv[pid] || 0) + qty * 30;
       }
       for (const [pid, qty] of Object.entries(recipe.outputs)) {
-        owner.inventory[pid] = (owner.inventory[pid] || 0) + qty * 5;
+        inv[pid] = (inv[pid] || 0) + qty * 5;
       }
     }
+
+    // === 3. Seed AI exporters for this town (Sprint C) ===
+    seedExportersFor(state, cid, EXPORTERS.perTownCount);
   }
 }
 

@@ -43,9 +43,15 @@ export function quoteLoan(state, productId, principal, opts = {}) {
   };
 }
 
+// Resolves any actor with a `cash` wallet by id. Uses the central wallet
+// registry (state.wallets) so adding a new actor type doesn't require
+// touching this function. Falls back to the aiFarmers scan for any caller
+// that pre-dates the registry init (cold-start safety).
 export function walletFor(state, borrowerId) {
   if (borrowerId === 'player') return state.player;
-  return state.aiFarmers?.find(a => a.id === borrowerId) ?? null;
+  return state.wallets?.[borrowerId]
+    ?? state.aiFarmers?.find(a => a.id === borrowerId)
+    ?? null;
 }
 
 // =============================================================================

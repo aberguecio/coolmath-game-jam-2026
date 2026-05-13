@@ -1,6 +1,6 @@
 import { EVENTS } from '../data/tunables.js';
 import { EVENT_TYPES, EVENT_TYPE_LIST } from '../data/eventTypes.js';
-import { pushLog } from '../state/GameState.js';
+import { pushLog, logEvent } from '../state/GameState.js';
 
 // Effect handlers — keyed by effectId from eventTypes.js.
 // Adding a new effectId = add a handler here. Adding a new event type using an existing effectId
@@ -79,23 +79,19 @@ const effectHandlers = {
   },
 };
 
-function recordHistory(state, entry) {
-  if (!state.eventHistory) state.eventHistory = [];
-  state.eventHistory.push(entry);
-  if (state.eventHistory.length > 500) state.eventHistory.shift();
-}
-
 export function tickEvents(state) {
   state.activeEvents = state.activeEvents.filter(e => {
     e.daysRemaining -= 1;
     if (e.daysRemaining <= 0) {
       const def = EVENT_TYPES[e.type];
       if (def) effectHandlers[def.effectId]?.onRemove?.(state, def.params, e);
-      pushLog(state, `Ended: ${def?.label ?? e.type}`);
-      recordHistory(state, {
-        type: e.type, label: def?.label ?? e.type,
-        appliedDay: e.appliedDay ?? null, endedDay: state.time.totalDays,
-        country: def?.params?.country ?? null,
+      const label = def?.label ?? e.type;
+      const country = def?.params?.country ?? null;
+      pushLog(state, `Ended: ${label}`);
+      logEvent(state, {
+        tier: 1, category: 'world-event-end',
+        countryId: country, summary: `Ended: ${label}`,
+        meta: { type: e.type, appliedDay: e.appliedDay ?? null },
       });
       return false;
     }
@@ -108,6 +104,12 @@ export function tickEvents(state) {
     effectHandlers[def.effectId]?.onApply?.(state, def.params, event);
     state.activeEvents.push(event);
     pushLog(state, `EVENT: ${def.label}`);
+    logEvent(state, {
+      tier: 1, category: 'world-event-start',
+      countryId: def.params?.country ?? null,
+      summary: `EVENT: ${def.label}`,
+      meta: { type: def.id, duration: def.duration },
+    });
   }
 }
 

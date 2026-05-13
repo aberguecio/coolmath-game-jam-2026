@@ -18,12 +18,19 @@
 import { PRODUCIBLES } from '../data/producibles.js';
 import { effectiveTaxRates } from '../data/taxRates.js';
 import { transportCost } from '../data/distances.js';
+import { logEvent } from '../state/GameState.js';
 
 export function walletOf(state, ownerId) {
   if (ownerId === 'player') return state.player;
   if (ownerId === 'population' || ownerId === 'treasury') return null;
   if (ownerId === 'foreign') return null;
-  return state.aiFarmers?.find(a => a.id === ownerId) ?? null;
+  // Registry lookup — any actor type that registered itself in state.wallets
+  // (AI farmers, exporters, future actors) is reachable through this single
+  // call. Falls back to aiFarmers scan for any legacy caller that pre-dates
+  // the registry init.
+  return state.wallets?.[ownerId]
+    ?? state.aiFarmers?.find(a => a.id === ownerId)
+    ?? null;
 }
 
 export function executeTransaction(state, params) {
@@ -131,6 +138,18 @@ export function executeTransaction(state, params) {
     grossRevenue, taxPaid, wagePaid, transportPaid: tCost, netToSeller,
   });
   if (state.ledger.length > 200) state.ledger.shift();
+
+  // Tier-4 transactional log. The "actor" is whichever side is a real wallet;
+  // we prefer the buyer because that's usually the entity initiating the move
+  // (population buying food, exporter buying cargo, AI topping up inputs).
+  const actorId = isRealBuyer ? buyerId : (isRealSeller ? sellerId : null);
+  logEvent(state, {
+    tier: 4, category: `tx-${type}`,
+    countryId: countryOfTransaction, actorId,
+    summary: `${type} ${units}u ${productId} @ $${Math.round(unitPrice)} in ${countryOfTransaction}`,
+    amount: Math.round(grossRevenue),
+    meta: { sellerId, buyerId, units, unitPrice, taxPaid, transportPaid: tCost },
+  });
 
   return {
     ok: true,

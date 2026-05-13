@@ -60,6 +60,10 @@ export function createAIFarmersForCountry(state, countryId) {
       cash: AI.startCash,
       ownedTileIds: owned,
       cooldown: i * 2,
+      // Per-country inventory. AI farmers only ever transact in their home
+      // country, but the schema mirrors the player so every wallet shares one
+      // code path (SRP for inventory access — see inventoryFor in Market.js).
+      inventoryByCountry: { [countryId]: {} },
     });
   }
   return farmers;

@@ -14,7 +14,7 @@ import { PRODUCIBLES } from '../data/producibles.js';
 import { FISCAL_CRISIS, INDUSTRY } from '../data/tunables.js';
 import { pushLog, pushFx, isHaloTile } from '../state/GameState.js';
 import { walletFor } from './Bank.js';
-import { executeTransaction } from './Transactions.js';
+import { inventoryFor, buyFromGlobal, sellFromInventory } from './Market.js';
 import { effectiveSalary, effectiveBuildCost } from './Inflation.js';
 
 let _nextId = 1;
@@ -124,14 +124,15 @@ export function tickIndustries(state) {
 
     const wallet = walletFor(state, ind.ownerId);
     if (!wallet) { ind.status = 'idle'; continue; }
-    if (!wallet.inventory) wallet.inventory = {};
     const isPlayer = ind.ownerId === 'player';
     const cid = ind.countryId;
+    const inv = inventoryFor(wallet, cid);
 
-    // 1. Ensure inputs are available. Player must stock manually; AI auto-buys.
+    // 1. Ensure inputs are available. Player must stock manually; AI auto-buys
+    //    through the same buyFromGlobal rail the player UI uses.
     let allInputs = true;
     for (const [pid, qty] of Object.entries(recipe.inputs)) {
-      const have = wallet.inventory[pid] || 0;
+      const have = inv[pid] || 0;
       if (have >= qty) continue;
       if (isPlayer) { allInputs = false; break; }
       const need = qty - have;
@@ -140,47 +141,21 @@ export function tickIndustries(state) {
       if (price <= 0 || stock < need || wallet.cash < price * need * 1.2) {
         allInputs = false; break;
       }
-      const r = executeTransaction(state, {
-        sellerId: 'foreign', buyerId: ind.ownerId,
-        productId: pid, units: need, unitPrice: price,
-        countryOfTransaction: cid, sellerCountryId: cid,
-        type: 'b2b',
-      });
+      const r = buyFromGlobal(state, ind.ownerId, pid, need, cid);
       if (!r.ok) { allInputs = false; break; }
-      state.market.inventory[cid][pid] -= need;
-      wallet.inventory[pid] = (wallet.inventory[pid] || 0) + need;
     }
     if (!allInputs) { ind.status = 'idle'; continue; }
 
     // 2. Consume inputs
     for (const [pid, qty] of Object.entries(recipe.inputs)) {
-      wallet.inventory[pid] -= qty;
+      inv[pid] -= qty;
     }
 
-    // 3. Produce outputs. Player keeps in inventory; AI auto-sells to market.
+    // 3. Produce outputs. Always deposit to inventory first; AI then drip-sells
+    //    via aiSellIndustryOutputs / aiTrySellInventory. Player sells manually
+    //    from the Market modal. Same code path for both.
     for (const [pid, qty] of Object.entries(recipe.outputs)) {
-      if (isPlayer) {
-        wallet.inventory[pid] = (wallet.inventory[pid] || 0) + qty;
-      } else {
-        const price = state.market.prices?.[cid]?.[pid] || 0;
-        if (price <= 0) {
-          wallet.inventory[pid] = (wallet.inventory[pid] || 0) + qty;
-          continue;
-        }
-        const r = executeTransaction(state, {
-          sellerId: ind.ownerId, buyerId: 'foreign',
-          productId: pid, units: qty, unitPrice: price,
-          countryOfTransaction: cid, sellerCountryId: cid,
-          type: 'b2b',
-        });
-        if (r.ok) {
-          const country = state.countries[cid];
-          if (country) country.supplyToday[pid] = (country.supplyToday[pid] || 0) + qty;
-        } else {
-          // Sale failed (saturated market) — keep stock for monthly auto-sell.
-          wallet.inventory[pid] = (wallet.inventory[pid] || 0) + qty;
-        }
-      }
+      inv[pid] = (inv[pid] || 0) + qty;
     }
 
     ind.status = 'operational';

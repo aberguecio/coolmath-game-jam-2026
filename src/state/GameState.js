@@ -2,6 +2,7 @@ import { TIME, MAP, PLAYER_START, TILE, CITY, WAGES } from '../data/tunables.js'
 import { distanceToCity, cityRadius } from '../systems/City.js';
 import { createAIFarmersForCountry } from '../systems/AI.js';
 import { createCountriesState, initMarket } from '../systems/Market.js';
+import { initMarketSnapshot } from '../systems/MarketHistory.js';
 import { generateMineralDeposits } from '../systems/Mining.js';
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID, COUNTRIES } from '../data/countries.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
@@ -198,7 +199,10 @@ export function createInitialState() {
       cash: PLAYER_START.cash,
       bankrupt: false,
       wcCooldownUntilDay: 0,
-      inventory: {},
+      // Inventory partitioned by country — the player cannot teleport goods.
+      // Buy in Riverside → stays in inventoryByCountry.usa. To move it home
+      // the player must (eventually) found an exporter; see TODO.md.
+      inventoryByCountry: Object.fromEntries(COUNTRY_IDS.map(cid => [cid, {}])),
     },
     maps,
     cities,
@@ -218,6 +222,12 @@ export function createInitialState() {
     selection: { tileId: null, countryId: PLAYER_COUNTRY_ID },
     log: [{ day: 0, text: 'Welcome. You own 1 plot in Home and $0. Visit the bank.' }],
     aiFarmers: [],
+    exporters: [],
+    // Centralised wallet registry — id → wallet object. Lets Transactions.js
+    // resolve any owner type via a single lookup instead of a hardcoded chain
+    // (aiFarmers ?? exporters ?? banks…). Pattern: any actor with a `cash`
+    // field registers here at creation, deregisters on destruction.
+    wallets: {},
     activeEvents: [],
     eventHistory: [],
     fxQueue: [],
@@ -262,6 +272,7 @@ export function createInitialState() {
   }
 
   initMarket(state);
+  initMarketSnapshot(state);
   generateMineralDeposits(state);
 
   return state;
@@ -270,10 +281,26 @@ export function createInitialState() {
 
 export function initAIFarmers(state) {
   state.aiFarmers = [];
+  if (!state.wallets) state.wallets = {};
   for (const cid of COUNTRY_IDS) {
     const farmers = createAIFarmersForCountry(state, cid);
-    state.aiFarmers.push(...farmers);
+    for (const f of farmers) {
+      state.aiFarmers.push(f);
+      state.wallets[f.id] = f;       // register wallet for executeTransaction
+    }
   }
+  // Player wallet is also addressable for symmetry, though Transactions.js
+  // also short-circuits to state.player for the 'player' id.
+  state.wallets.player = state.player;
+}
+
+// Helper used by any module that creates a new actor with cash.
+export function registerWallet(state, wallet) {
+  if (!state.wallets) state.wallets = {};
+  state.wallets[wallet.id] = wallet;
+}
+export function unregisterWallet(state, id) {
+  if (state.wallets) delete state.wallets[id];
 }
 
 // =============================================================================
@@ -343,6 +370,48 @@ export function tilePrice(tile, state = null) {
 export function pushLog(state, text) {
   state.log.unshift({ day: state.time.totalDays, text });
   if (state.log.length > 40) state.log.length = 40;
+  // Mirror into the unified event history so the Events modal sees ALL action,
+  // not just world events. Default tier=2 (strategic) — most pushLog sites
+  // already describe meaningful state changes (buy/sell/build/close).
+  logEvent(state, { tier: 2, category: 'log', summary: text });
+}
+
+// Resolve a wallet id into a display name. Used by logEvent when the caller
+// passes actorId but not actorName — saves callers from repeating the lookup.
+export function resolveActorName(state, actorId) {
+  if (!actorId) return null;
+  if (actorId === 'player') return 'YOU (Player)';
+  if (actorId === 'population' || actorId === 'treasury' || actorId === 'foreign') return actorId;
+  const ai = state.aiFarmers?.find(a => a.id === actorId);
+  if (ai) return ai.name;
+  const exp = state.exporters?.find(e => e.id === actorId);
+  if (exp) return exp.name;
+  return actorId;
+}
+
+// Unified event history. Every meaningful tick or decision lands here so the
+// Events modal can filter and export. Schema:
+//   { day, tier, category, countryId, actorId, actorName, summary, reason,
+//     amount, meta }
+// Ring buffer cap 10000 — at speed ×8 a year produces ~5k entries with the
+// current tier mix, so this holds a couple of in-game years comfortably.
+const EVENT_HISTORY_CAP = 10000;
+export function logEvent(state, entry) {
+  if (!state.eventHistory) state.eventHistory = [];
+  const actorName = entry.actorName ?? resolveActorName(state, entry.actorId);
+  state.eventHistory.push({
+    day: state.time.totalDays,
+    tier: entry.tier ?? 3,
+    category: entry.category ?? 'misc',
+    countryId: entry.countryId ?? null,
+    actorId: entry.actorId ?? null,
+    actorName: actorName ?? null,
+    summary: entry.summary ?? '',
+    reason: entry.reason ?? null,
+    amount: entry.amount ?? null,
+    meta: entry.meta ?? null,
+  });
+  if (state.eventHistory.length > EVENT_HISTORY_CAP) state.eventHistory.shift();
 }
 
 export function pushFx(state, event) {
@@ -362,4 +431,13 @@ export function pushAIDecision(state, entry) {
   if (!state.aiDecisionLog) state.aiDecisionLog = [];
   state.aiDecisionLog.push({ day: state.time.totalDays, ...entry });
   if (state.aiDecisionLog.length > 200) state.aiDecisionLog.shift();
+  // Mirror to eventHistory at tier 3 (tactical) — these are decision-level
+  // events with a reason attached, perfect for "why did the AI do X?" audits.
+  logEvent(state, {
+    tier: 3,
+    category: `ai-${entry.action ?? 'decision'}`,
+    actorId: entry.companyId,
+    summary: `${entry.action ?? 'considered'} ${entry.recipeId ?? entry.producibleId ?? ''}`.trim(),
+    reason: entry.reason ?? null,
+  });
 }

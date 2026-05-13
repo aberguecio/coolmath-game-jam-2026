@@ -78,7 +78,7 @@ function autoHarvest(state, tile, def) {
   tile.matureSinceDay = null;                     // clear grace timer
 
   if (tile.owner === 'player') {
-    harvestToInventory(state, 'player', tile.crop, units);
+    harvestToInventory(state, 'player', tile.crop, units, tile.countryId);
     pushLog(state, `Harvested ${units}u of ${def.name} → inventory`);
     const colorHex = '#' + def.color.toString(16).padStart(6, '0');
     pushFx(state, {
@@ -96,11 +96,10 @@ function autoHarvest(state, tile, def) {
     // AI deposits to its own inventory (same as player). The actual selling
     // happens later in aiTrySellInventory at fair-market prices, gradually.
     // This breaks the cobweb dump-sell cycle.
+    // Same code path as the player above — one harvestToInventory, one
+    // inventoryFor under the hood. Goods land in the country where the tile is.
     const ai = state.aiFarmers?.find(a => a.id === tile.owner);
-    if (ai) {
-      if (!ai.inventory) ai.inventory = {};
-      ai.inventory[tile.crop] = (ai.inventory[tile.crop] || 0) + units;
-    }
+    if (ai) harvestToInventory(state, ai.id, tile.crop, units, tile.countryId);
     // Profitability streak: AI counts how many consecutive harvests would
     // have lost money at current spot prices. For perennials, after 2 lost
     // cycles in a row, uproot so the tile can be replanted with something

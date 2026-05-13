@@ -5,15 +5,18 @@
 // supply at `AI.sellRate` per tick. Hard cap: if inventory exceeds N days
 // of local consumption, dump the excess regardless of price — prevents
 // permanent hoarding.
+//
+// SRP: only decides WHEN/HOW MUCH to sell. The selling rail (executeTransaction
+// + supplyToday push) is `sellFromInventory` in Market.js — the same one the
+// player uses, so AI and player share one code path.
 
 import { AI } from '../data/tunables.js';
-import { priceMA } from './Market.js';
-import { executeTransaction } from './Transactions.js';
+import { priceMA, sellFromInventory, inventoryFor } from './Market.js';
 
 export function aiTrySellInventory(state, ai) {
-  if (!ai.inventory) return;
   const cid = ai.countryId;
-  for (const [pid, qty] of Object.entries(ai.inventory)) {
+  const inv = inventoryFor(ai, cid);
+  for (const [pid, qty] of Object.entries(inv)) {
     if (qty <= 0) continue;
     const price = state.market.prices?.[cid]?.[pid] || 0;
     if (price <= 0) continue;
@@ -33,18 +36,6 @@ export function aiTrySellInventory(state, ai) {
       ? Math.ceil(qty - cap)
       : Math.max(1, Math.floor(qty * AI.sellRate));
 
-    const r = executeTransaction(state, {
-      sellerId: ai.id, buyerId: 'foreign',
-      productId: pid, units: sellQty, unitPrice: price,
-      countryOfTransaction: cid, sellerCountryId: cid,
-      type: 'b2b',
-    });
-    if (r.ok) {
-      ai.inventory[pid] = qty - sellQty;
-      const country = state.countries[cid];
-      if (country) {
-        country.supplyToday[pid] = (country.supplyToday[pid] || 0) + sellQty;
-      }
-    }
+    sellFromInventory(state, ai.id, pid, sellQty, cid);
   }
 }

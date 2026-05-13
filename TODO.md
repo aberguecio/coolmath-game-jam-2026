@@ -4,6 +4,42 @@
 
 ---
 
+## [ ] Player funda su propia exportadora
+
+### Contexto
+El refactor de inventario per-country (Sprint C +) cerró la posibilidad de que el
+player mueva mercadería entre towns directamente. Hoy un wallet sólo transa
+dentro de la región donde tiene los bienes; cross-country queda exclusivo de las
+exportadoras AI. Eso es **intencional** mientras no exista UI para que el player
+funde su propia exportadora.
+
+### Diseño preliminar
+- Botón "Found Exporter" dentro del modal 🚢 Exporters.
+- Pide nombre, capital inicial (mínimo `EXPORTERS.baseCapital`).
+- Crea entry en `state.exporters` con `ownerId: 'player'` y registra wallet.
+- Cobra `state.player.cash` por el seed capital y lo deposita en `exporter.cash`.
+- UI de "policy": producible whitelist, max capital por viaje, min margin.
+- `ExporterAI.aiExporterTryShipment` se sigue corriendo para AI; el player
+  decide manualmente desde la modal (botón "Plan shipment" elige src/dst/pid/qty
+  y dispara `exporterStartShipment`).
+
+### Files probables
+- `src/scenes/Game.js` — extender Exporters modal (form de creación + planner).
+- `src/systems/Exporters.js` — exponer `createExporter` con ownerId player.
+- `src/state/GameState.js` — registrar wallet del player-exporter al crearlo.
+
+### Riesgos
+- Conservación: el player ya es wallet; agregar un wallet exporter distinto
+  pero del mismo "ownerId" (player) rompe el supuesto de 1 wallet por id.
+  Solución: dar al exporter su propio id (`exp_player_<n>`) y mostrarlo como
+  "tu empresa" en UI.
+- Cross-country sneaky: confirmar que el player **no** pueda mover stock entre
+  sus inventarios cross-country por otra vía (ej. comprar en USA y "depositar"
+  en home). Hoy todo va por buyFromGlobal/sellFromInventory que respeta cid, así
+  que está bien — pero validar otra vez al implementar.
+
+---
+
 ## Roadmap
 
 > Orden recomendado para los 3 items pendientes. Cada uno es una "sprint" independiente y shippable. La justificación del orden está en las dependencias económicas: el mercado laboral fija la convención de cómo se paga la mano de obra (en `workforce × wageRate`), el cobweb fix consume esa convención (storage cost va a wageFund vía warehouse labor), y las exportadoras se construyen sobre el patrón de "compra-guarda-vende" del cobweb fix.
