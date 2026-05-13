@@ -1127,20 +1127,61 @@ export class Game extends Phaser.Scene {
     this.chartGroup.add(closeTxt);
 
     // Vertical anchors. Country info block sits between title and the
-    // scrollable market table. Scroll body bottom leaves room for legend.
+    // scrollable market table. New layout adds a window selector and a food
+    // basket strip between demographics and the per-producible flow rows.
     const infoTop = y + 46;
-    const marketTop = y + 220;             // info block uses ~170px
+    const windowSelY = y + 196;            // demographics uses ~150px
+    const basketTop = y + 222;             // 26px for window selector
+    const marketTop = y + 304;             // 82px for basket
     const marketBottom = y + h - 24;       // 24px for legend at bottom
 
-    this.chartCard = { x, y, w, h, infoTop, marketTop, marketBottom };
+    this.chartCard = { x, y, w, h, infoTop, windowSelY, basketTop, marketTop, marketBottom };
     this.chartGfx = this.add.graphics().setDepth(56);
     this.chartGroup.add(this.chartGfx);
     this.chartLabels = [];
+    // Interactive window-selector buttons. Lazy-built on first openCountryChart
+    // so the geometry uses the chartCard layout already computed.
+    this.windowBtns = null;
 
     // Wheel scroll for the market table body.
     this.bindWheelScroll(card, 'countryChart',
       () => this.computeCountryChartMaxScroll(),
       () => this.refreshCountryChart());
+  }
+
+  // Window-selector buttons (1d / 7d / 30d / 90d). Switching re-renders.
+  ensureWindowButtons() {
+    if (this.windowBtns) return;
+    const { x, w, windowSelY } = this.chartCard;
+    const opts = [
+      { label: '1d', days: 1 },
+      { label: '7d', days: 7 },
+      { label: '30d', days: 30 },
+      { label: '90d', days: 90 },
+    ];
+    const btnW = 44, btnH = 20, gap = 6;
+    const totalW = opts.length * btnW + (opts.length - 1) * gap;
+    let cx = x + w - totalW - 18;
+    this.windowBtns = [];
+    for (const opt of opts) {
+      const bg = this.add.rectangle(cx, windowSelY, btnW, btnH, 0x243345)
+        .setOrigin(0, 0).setInteractive({ useHandCursor: true }).setDepth(57);
+      const txt = this.add.text(cx + btnW / 2, windowSelY + btnH / 2, opt.label, {
+        fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
+      }).setOrigin(0.5).setDepth(58);
+      bg.on('pointerdown', () => {
+        this.state.ui.countryChartWindow = opt.days;
+        this.refreshCountryChart();
+      });
+      this.chartGroup.add(bg); this.chartGroup.add(txt);
+      this.windowBtns.push({ bg, txt, days: opt.days });
+      cx += btnW + gap;
+    }
+    // Label "Window:" to the left of the buttons
+    const lbl = this.add.text(x + w - totalW - 18 - 8, windowSelY + btnH / 2,
+      'Window:', { fontFamily: 'monospace', fontSize: '10px', color: '#7a8694' })
+      .setOrigin(1, 0.5).setDepth(58);
+    this.chartGroup.add(lbl);
   }
 
   computeCountryChartMaxScroll() {
@@ -1154,8 +1195,10 @@ export class Game extends Phaser.Scene {
     if (!this.state.ui.countryChartOpen) {
       this.enterModal();
     }
+    if (this.state.ui.countryChartWindow == null) this.state.ui.countryChartWindow = 7;
     this.state.ui.countryChartOpen = true;
     this.chartGroup.setVisible(true);
+    this.ensureWindowButtons();
     this.refreshCountryChart();
     this.refreshTopBar();
   }
@@ -1416,11 +1459,97 @@ export class Game extends Phaser.Scene {
       'Harvest cost = harvestLabor × wage. Yield depends on tile.quality.');
 
     // ============================================================
-    // MARKET TABLE — scrollable
+    // WINDOW SELECTOR — visual highlight del activo
+    // ============================================================
+    const windowDays = s.ui.countryChartWindow ?? 7;
+    ls(x + 18, s.ui.countryChartWindow ? this.chartCard.windowSelY + 4 : this.chartCard.windowSelY + 4,
+      '── REAL FLOW (last) ──', '#7a8694', '10px');
+    if (this.windowBtns) {
+      for (const b of this.windowBtns) {
+        const active = b.days === windowDays;
+        b.bg.setFillStyle(active ? 0xffb347 : 0x243345);
+        b.txt.setColor(active ? '#1a1a1a' : '#cdd6df');
+      }
+    }
+
+    // Aggregations: sum over last `windowDays` of consumptionHistory / supplyHistory.
+    // Reused helper — same path both sections.
+    const aggSum = (arr) => {
+      if (!arr || arr.length === 0) return 0;
+      const slice = arr.slice(-windowDays);
+      let s = 0;
+      for (const v of slice) s += v || 0;
+      return s;
+    };
+
+    // ============================================================
+    // SECTION A — FOOD BASKET (lo que compró la población realmente)
+    // Stacked horizontal bar mostrando share por food de la canasta total.
+    // Datos: consumptionHistory[pid] para isFood(pid) sumado sobre ventana.
+    // ============================================================
+    const basketY = this.chartCard.basketTop;
+    ls(x + 18, basketY, '── FOOD BASKET ──', '#7a8694', '10px');
+
+    const foodBasket = [];
+    let basketTotal = 0;
+    for (const def of PRODUCIBLE_LIST) {
+      if (def.commodityType !== 'food') continue;
+      const units = aggSum(run.consumptionHistory?.[def.id]);
+      if (units <= 0) continue;
+      foodBasket.push({ def, units });
+      basketTotal += units;
+    }
+    foodBasket.sort((a, b) => b.units - a.units);
+
+    if (basketTotal <= 0) {
+      ls(x + 18, basketY + 16, '(no food purchases recorded in this window)', '#566370', '10px');
+    } else {
+      // Stacked horizontal bar
+      const barX = x + 18;
+      const barY = basketY + 18;
+      const barW = w - 36;
+      const barH = 18;
+      let cursor = barX;
+      for (const item of foodBasket) {
+        const segW = (item.units / basketTotal) * barW;
+        this.chartGfx.fillStyle(item.def.color, 0.92);
+        this.chartGfx.fillRect(cursor, barY, segW, barH);
+        cursor += segW;
+      }
+      this.chartGfx.lineStyle(1, 0x3a4d63, 1);
+      this.chartGfx.strokeRect(barX, barY, barW, barH);
+
+      // Legend below bar: name pct unit, two columns if many items
+      const legendY = barY + barH + 4;
+      const colHalf = w / 2 - 12;
+      foodBasket.forEach((item, i) => {
+        const col = i < 4 ? 0 : 1;
+        const row = i % 4;
+        const cx = x + 18 + col * (colHalf + 4);
+        const cy = legendY + row * 10;
+        const pct = (item.units / basketTotal * 100).toFixed(0);
+        const colHex = '#' + item.def.color.toString(16).padStart(6, '0');
+        // Small color square
+        const sq = this.add.rectangle(cx, cy + 4, 8, 8, item.def.color)
+          .setOrigin(0, 0.5).setDepth(57);
+        this.chartGroup.add(sq); this.chartLabels.push(sq);
+        const lbl = this.add.text(cx + 12, cy,
+          `${item.def.name} ${pct}% (${item.units.toFixed(0)}u)`, {
+          fontFamily: 'monospace', fontSize: '9px', color: colHex,
+        }).setDepth(57);
+        this.chartGroup.add(lbl); this.chartLabels.push(lbl);
+      });
+    }
+
+    // ============================================================
+    // SECTION B — SUPPLY / DEMAND POR PRODUCIBLE (real flow, scrollable)
+    // Reemplaza la tradeBalance vieja. Una fila por producible con dos barras
+    // paralelas: supply (verde) y demand (rojo). Net explícito al lado.
+    // Datos: supplyHistory / consumptionHistory sumados sobre ventana.
     // ============================================================
     const headerY = marketTop;
-    ls(colA, headerY, '── MARKET (trade balance / supply / demand) ──', '#7a8694', '10px');
-    ls(x + w - 200, headerY, '⇧ importing  ⇩ exporting', '#566370', '9px');
+    ls(colA, headerY, '── SUPPLY vs DEMAND ──', '#7a8694', '10px');
+    ls(x + w - 200, headerY, '🟢 supply  🔴 demand', '#566370', '9px');
 
     const rowsTop = marketTop + 16;
     const rowH = 36;
@@ -1428,63 +1557,53 @@ export class Game extends Phaser.Scene {
 
     const rows = PRODUCIBLE_LIST;
     const labelW = 90;
-    const valueW = 70;
+    const valueW = 80;
     const barAreaX = x + 20 + labelW;
     const barAreaW = w - 40 - labelW - valueW;
-    const axisX = barAreaX + barAreaW / 2;
 
-    let maxAbs = 1;
-    for (const def of rows) {
-      const v = Math.abs(run.tradeBalanceEMA?.[def.id] ?? 0);
-      if (v > maxAbs) maxAbs = v;
+    // Pre-compute aggregations + max for scale
+    const rowsAgg = rows.map(def => {
+      const supply = aggSum(run.supplyHistory?.[def.id]);
+      const demand = aggSum(run.consumptionHistory?.[def.id]);
+      return { def, supply, demand };
+    });
+    let maxFlow = 1;
+    for (const r of rowsAgg) {
+      if (r.supply > maxFlow) maxFlow = r.supply;
+      if (r.demand > maxFlow) maxFlow = r.demand;
     }
 
-    rows.forEach((def, i) => {
+    rowsAgg.forEach((agg, i) => {
       const cy = rowsTop + i * rowH - scrollY;
       const midY = cy + rowH / 2;
-      // Clip to scroll viewport.
       if (cy + rowH < rowsTop || cy > marketBottom) return;
 
-      const nameTxt = this.add.text(x + 20, midY - 5, def.name, {
+      const def = agg.def;
+      const nameTxt = this.add.text(x + 20, midY, def.name, {
         fontFamily: 'monospace', fontSize: '11px', color: '#e8edf3',
       }).setOrigin(0, 0.5).setDepth(57);
       this.chartGroup.add(nameTxt); this.chartLabels.push(nameTxt);
 
-      const elasticity = elasticityFor(s, countryId, def.id);
-      const target = elasticityTargetFor(s, countryId, def.id);
-      const consDaily = run.consumption[def.id] || 0;
-      const supplyToday = run.supplyToday?.[def.id] || 0;
-      const drift = target > elasticity + 0.05 ? '→' : target < elasticity - 0.05 ? '←' : '·';
-      const breakdown =
-        `+${supplyToday.toFixed(1)}u ×${elasticity.toFixed(2)}${drift}${target.toFixed(2)} / ${consDaily.toFixed(1)}c`;
-      const breakdownTxt = this.add.text(x + 20, midY + 8, breakdown, {
-        fontFamily: 'monospace', fontSize: '8px',
-        color: elasticity > 1.05 ? '#8cffaa' : elasticity < 0.95 ? '#ff8c8c' : '#7a8694',
+      // Two parallel bars stacked vertically in the row.
+      const barH = 9;
+      const sBarLen = (agg.supply / maxFlow) * barAreaW;
+      const dBarLen = (agg.demand / maxFlow) * barAreaW;
+      this.chartGfx.fillStyle(0x6ee79a, 0.85);
+      this.chartGfx.fillRect(barAreaX, midY - barH - 1, sBarLen, barH);
+      this.chartGfx.fillStyle(0xff6b6b, 0.85);
+      this.chartGfx.fillRect(barAreaX, midY + 1, dBarLen, barH);
+      // Axis line
+      this.chartGfx.lineStyle(1, 0x3a4d63, 0.6);
+      this.chartGfx.lineBetween(barAreaX, midY + barH + 2, barAreaX + barAreaW, midY + barH + 2);
+
+      const net = agg.supply - agg.demand;
+      const netColor = net > 0.5 ? '#8cffaa' : net < -0.5 ? '#ff8c8c' : '#7a8694';
+      const netSign = net > 0 ? '+' : '';
+      const netTxt = this.add.text(barAreaX + barAreaW + 6, midY,
+        `${netSign}${net.toFixed(0)}`, {
+        fontFamily: 'monospace', fontSize: '11px', fontStyle: 'bold', color: netColor,
       }).setOrigin(0, 0.5).setDepth(57);
-      this.chartGroup.add(breakdownTxt); this.chartLabels.push(breakdownTxt);
-
-      this.chartGfx.lineStyle(1, 0x3a4d63, 1);
-      this.chartGfx.lineBetween(barAreaX, midY, barAreaX + barAreaW, midY);
-      this.chartGfx.lineStyle(1, 0xcdd6df, 0.7);
-      this.chartGfx.lineBetween(axisX, cy + 4, axisX, cy + rowH - 4);
-
-      const value = run.tradeBalanceEMA?.[def.id] ?? 0;
-      const importing = value > 0;
-      const barLen = (Math.abs(value) / maxAbs) * (barAreaW / 2 - 4);
-      const barH = 14;
-      const barColor = importing ? 0xff6b6b : 0x6ee79a;
-
-      this.chartGfx.fillStyle(barColor, 0.85);
-      if (importing) this.chartGfx.fillRect(axisX, midY - barH / 2, barLen, barH);
-      else this.chartGfx.fillRect(axisX - barLen, midY - barH / 2, barLen, barH);
-
-      const arrow = Math.abs(value) < 0.5 ? '·' : (importing ? '⇧' : '⇩');
-      const valTxt = this.add.text(barAreaX + barAreaW + 8, midY,
-        `${arrow} ${value > 0 ? '+' : ''}${value.toFixed(1)}`, {
-        fontFamily: 'monospace', fontSize: '11px', fontStyle: 'bold',
-        color: importing ? '#ff8c8c' : '#8cffaa',
-      }).setOrigin(0, 0.5).setDepth(57);
-      this.chartGroup.add(valTxt); this.chartLabels.push(valTxt);
+      this.chartGroup.add(netTxt); this.chartLabels.push(netTxt);
     });
 
     // Scroll indicator on right edge if there's overflow.

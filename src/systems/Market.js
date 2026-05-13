@@ -32,6 +32,7 @@ export function createCountriesState() {
       population: c.population,
       consumption: { ...c.consumption },     // seed inicial del consumptionHistory + peso del basket de priceIndex + escalado por eventos/yearly. Ya NO drena marketStock (la limpieza lo sacó).
       consumptionHistory: {},                // ring buffer 90 días de compras reales por pid; alimenta target dinámico
+      supplyHistory: {},                     // ring buffer 90 días de ventas reales por pid; espejo de consumptionHistory para UI
       supplyToday: {},                       // unidades vendidas hoy por agentes reales; tickMarket las traslada a m.inventory y resetea al final
       consumptionDay: {},                    // unidades compradas hoy por agentes reales; rotado al consumptionHistory cada día
       preferenceModifiers: {},
@@ -55,6 +56,7 @@ export function createCountriesState() {
       // de los siguientes 3 meses.
       const seed = c.consumption[pid] || 0;
       runtime[id].consumptionHistory[pid] = new Array(90).fill(seed);
+      runtime[id].supplyHistory[pid] = new Array(90).fill(0);  // sin seed: la oferta arranca en cero
     }
   }
   return runtime;
@@ -125,18 +127,22 @@ export function tickMarket(state) {
   }
 
   const m = state.market;
-  // Rotar consumptionDay anterior al ring buffer consumptionHistory (90 días),
-  // luego resetear consumptionDay para acumular el día actual. Esto alimenta
-  // el target dinámico: lo que se compró ayer pesa en el target de mañana.
-  // Buyers reales (populationSpend, buyFromGlobal) acumulan en consumptionDay.
+  // Rotar consumptionDay y supplyToday anteriores a sus ring buffers (90 días),
+  // luego resetear el día actual. supplyHistory y consumptionHistory son los
+  // dos pulsos simétricos que alimentan tanto el target dinámico como la UI
+  // del modal del país (canasta alimentaria y supply/demand por producible).
   for (const cid of COUNTRY_IDS) {
     const c = state.countries[cid];
     if (!c.consumptionHistory) c.consumptionHistory = {};
+    if (!c.supplyHistory) c.supplyHistory = {};
     if (!c.consumptionDay) c.consumptionDay = {};
     for (const pid of PRODUCIBLE_IDS) {
       if (!c.consumptionHistory[pid]) c.consumptionHistory[pid] = [];
+      if (!c.supplyHistory[pid]) c.supplyHistory[pid] = [];
       c.consumptionHistory[pid].push(c.consumptionDay[pid] || 0);
+      c.supplyHistory[pid].push(c.supplyToday?.[pid] || 0);
       if (c.consumptionHistory[pid].length > 90) c.consumptionHistory[pid].shift();
+      if (c.supplyHistory[pid].length > 90) c.supplyHistory[pid].shift();
       c.consumptionDay[pid] = 0;
     }
   }
