@@ -1,0 +1,193 @@
+// PlayerActions — fachada de acciones que un player puede realizar.
+//
+// Cada export es un wrapper delgado sobre los sistemas existentes. Tanto la UI
+// (handlers de botones en Game.js) como cualquier bot (HeuristicBot, LLMBot)
+// llaman exclusivamente por esta capa — así un exploit detectado por la IA
+// también lo puede reproducir un humano y viceversa (LSP).
+//
+// Schema de acción serializable (discriminated union, JSON-friendly):
+//   { action: 'buyTile',        tileId: 42, countryId: 'home' }
+//   { action: 'sellInventory',  producibleId: 'wheat', units: 50, countryId: 'home' }
+//   { action: 'buildIndustry',  tileId: 17, recipeId: 'flourMill', countryId: 'home' }
+//   { action: 'noop' }
+//
+// Dispatcher: apply(state, action) → { ok, reason?, ...details }.
+// Toda accion retorna SIEMPRE un objeto resultado — nunca lanza. Esto deja
+// al bot lidiar con fallas (mercado seco, no hay cash, tile ya tomado, etc.)
+// vía control de flujo normal.
+
+import { tileById } from '../state/GameState.js';
+import {
+  buyTile, plowTile, plantTile, harvestTile, uprootTile, toggleAutoReplant, loteTile,
+} from '../systems/Farming.js';
+import { surveyTile, closeMine, reopenMine } from '../systems/Mining.js';
+import {
+  buildIndustry, closeIndustry, reopenIndustry,
+} from '../systems/Industries.js';
+import { applyForLoan } from '../systems/Bank.js';
+import { sellFromInventory, buyFromGlobal } from '../systems/Market.js';
+import { exporterStartShipment } from '../systems/Exporters.js';
+
+// =============================================================================
+// Tile lifecycle
+// =============================================================================
+export function actBuyTile(state, { tileId, countryId, mode = 'cash' }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return buyTile(state, tile, { mode });
+}
+
+export function actPlowTile(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return plowTile(state, tile, 'player');
+}
+
+export function actPlantTile(state, { tileId, countryId, producibleId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return plantTile(state, tile, producibleId, 'player');
+}
+
+export function actHarvestTile(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return harvestTile(state, tile);
+}
+
+export function actUprootTile(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return uprootTile(state, tile);
+}
+
+export function actToggleAutoReplant(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return toggleAutoReplant(state, tile);
+}
+
+export function actLoteTile(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return loteTile(state, tile);
+}
+
+// =============================================================================
+// Mining
+// =============================================================================
+export function actSurveyTile(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return surveyTile(state, tile, 'player');
+}
+
+export function actCloseMine(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return closeMine(state, tile);
+}
+
+export function actReopenMine(state, { tileId, countryId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return reopenMine(state, tile);
+}
+
+// =============================================================================
+// Industries
+// =============================================================================
+export function actBuildIndustry(state, { tileId, countryId, recipeId }) {
+  const tile = tileById(state, countryId, tileId);
+  if (!tile) return { ok: false, reason: 'tile not found' };
+  return buildIndustry(state, 'player', tile, recipeId);
+}
+
+export function actCloseIndustry(state, { industryId }) {
+  return closeIndustry(state, industryId);
+}
+
+export function actReopenIndustry(state, { industryId }) {
+  return reopenIndustry(state, industryId);
+}
+
+// =============================================================================
+// Market trading (player wallet only — bots use this same path)
+// =============================================================================
+export function actSellInventory(state, { producibleId, units, countryId }) {
+  return sellFromInventory(state, 'player', producibleId, units, countryId);
+}
+
+export function actBuyFromMarket(state, { producibleId, units, countryId }) {
+  return buyFromGlobal(state, 'player', producibleId, units, countryId);
+}
+
+// =============================================================================
+// Banking
+// =============================================================================
+export function actTakeLoan(state, { productId, amount }) {
+  return applyForLoan(state, productId, amount, { borrowerId: 'player' });
+}
+
+// =============================================================================
+// Exporting
+// =============================================================================
+export function actStartShipment(state, { exporterId, plan }) {
+  const exp = state.exporters?.find(e => e.id === exporterId);
+  if (!exp) return { ok: false, reason: 'exporter not found' };
+  if (exp.ownerId !== 'player') return { ok: false, reason: 'not your exporter' };
+  return exporterStartShipment(state, exp, plan);
+}
+
+// =============================================================================
+// No-op (bot decides not to act this tick)
+// =============================================================================
+export function actNoop() {
+  return { ok: true, reason: 'noop' };
+}
+
+// =============================================================================
+// Dispatcher
+// =============================================================================
+// Discriminated-union dispatch. Adding a new action = new entry in the
+// registry; cero cambios al motor o a los drivers (OCP).
+export const ACTION_REGISTRY = {
+  noop: actNoop,
+  buyTile: actBuyTile,
+  plowTile: actPlowTile,
+  plantTile: actPlantTile,
+  harvestTile: actHarvestTile,
+  uprootTile: actUprootTile,
+  toggleAutoReplant: actToggleAutoReplant,
+  loteTile: actLoteTile,
+  surveyTile: actSurveyTile,
+  closeMine: actCloseMine,
+  reopenMine: actReopenMine,
+  buildIndustry: actBuildIndustry,
+  closeIndustry: actCloseIndustry,
+  reopenIndustry: actReopenIndustry,
+  sellInventory: actSellInventory,
+  buyFromMarket: actBuyFromMarket,
+  takeLoan: actTakeLoan,
+  startShipment: actStartShipment,
+};
+
+export function apply(state, action) {
+  if (!action || typeof action !== 'object') {
+    return { ok: false, reason: 'action must be an object' };
+  }
+  const fn = ACTION_REGISTRY[action.action];
+  if (!fn) return { ok: false, reason: `unknown action: ${action.action}` };
+  try {
+    return fn(state, action) ?? { ok: true };
+  } catch (err) {
+    // Bots never break the loop. We surface the error to the trace so the
+    // user can spot which action shape is wrong, but the simulation marches on.
+    return { ok: false, reason: `threw: ${err?.message ?? err}` };
+  }
+}
+
+// List of valid action names — useful when prompting an LLM.
+export function listActions() {
+  return Object.keys(ACTION_REGISTRY);
+}

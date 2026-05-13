@@ -55,6 +55,7 @@ import { LOAN_PRODUCTS, LOAN_PRODUCT_LIST, resolveMaxPrincipal } from '../data/l
 import { startMusic, toggleMute, isMusicMuted } from '../systems/Music.js';
 import { play as playSfx } from '../systems/Sfx.js';
 import { downloadCSV } from '../util/csv.js';
+import { AutoplayController } from '../agent/Autoplay.js';
 
 const MAP_OFFSET_X = 10;
 const MAP_OFFSET_Y = 50;
@@ -115,6 +116,9 @@ export class Game extends Phaser.Scene {
     initAIFarmers(this.state);
     seedIndustries(this.state);
 
+    // Bot que puede tomar el control con la tecla A.
+    this.autoplay = new AutoplayController();
+
     this.cameras.main.setBackgroundColor('#0f1923');
     this.tileRects = [];
     this.cityGfx = this.add.graphics();
@@ -140,6 +144,10 @@ export class Game extends Phaser.Scene {
 
     this.input.keyboard.on('keydown-SPACE', () => {
       this.state.time.paused = !this.state.time.paused;
+    });
+    this.input.keyboard.on('keydown-A', () => {
+      this.autoplay.toggle(this.state);
+      this.refreshTopBar();
     });
     // Number-key shortcuts auto-bind to whatever speeds are registered (1..N).
     const numberKeys = ['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE'];
@@ -461,6 +469,12 @@ export class Game extends Phaser.Scene {
     this.exportersBtn = this.makeIconButton(exportersX, ICON_W, '🚢', 0x88c8ff, 0xa8d8ff,
       () => this.toggleExporters(true), 'Exporters');
 
+    // AUTOPLAY — clickable toggle (off → BOT → CLAUDE → off)
+    const autoX = place(ICON_W);
+    this.autoplayBtn = this.makeIconButton(autoX, ICON_W, '🤖', 0xa78bfa, 0xc4b5fd,
+      () => { this.autoplay.toggle(this.state); this.refreshTopBar(); },
+      'Autoplay (cycle off/BOT/CLAUDE)');
+
     // Music — small grey icon at the leftmost slot
     const musicX = place(28);
     this.musicBtnBg = this.add.rectangle(musicX, 8, 28, 28, 0x243345).setOrigin(0, 0)
@@ -500,6 +514,17 @@ export class Game extends Phaser.Scene {
       `📅 ${formatDate(s)}   💰 $${Math.round(s.player.cash)}   🏦 $${Math.round(debt)} (${loans})   ` +
       `mo $${Math.round(cuota)}${storageStr}   📍 ${here}`,
     );
+    // Indicador de autoplay vive abajo-derecha (out of the way de los iconos).
+    if (!this.autoplayBadge) {
+      this.autoplayBadge = this.add.text(GAME_WIDTH - 8, GAME_HEIGHT - 8, '', {
+        fontFamily: 'monospace', fontSize: '12px', color: '#e8edf3',
+        backgroundColor: '#1a2433', padding: { x: 6, y: 3 },
+      }).setOrigin(1, 1).setDepth(80);
+    }
+    const tag = this.autoplay?.mode === 'heuristic' ? '🤖 BOT'
+              : this.autoplay?.mode === 'claude' ? '🧠 CLAUDE'
+              : '';
+    this.autoplayBadge.setText(tag).setVisible(!!tag);
     for (const b of this.speedButtons) {
       const active = b.idx === s.time.speedIdx;
       b.bg.setFillStyle(active ? 0xffb347 : 0x243345);
@@ -1714,6 +1739,10 @@ export class Game extends Phaser.Scene {
     const events = tickClock(this.state, delta);
     // Canonical daily/monthly/yearly tick order (per plan section 7c):
     if (events.day) {
+      // Bot toma decisiones ANTES de que avancen los sistemas — equivalente
+      // a un humano que mira el state al final del día y clickea cosas para
+      // el día siguiente.
+      this.autoplay?.tickDay(this.state);
       tickEvents(this.state);
       tickFarming(this.state);          // 2: harvests → owner inventory
       tickIndustries(this.state);       // 3: industries consume inputs → produce outputs
