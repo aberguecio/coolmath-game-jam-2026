@@ -132,20 +132,7 @@ export function tickMarket(state) {
     for (const pid of PRODUCIBLE_IDS) {
       const prefMod = c.preferenceModifiers?.[pid] ?? 1;
       const supply = effectiveProduction(state, c, pid) + (c.supplyToday[pid] || 0);
-      const stockOnShelf = m.inventory?.[cid]?.[pid] || 0;
-      // Industriales (material + processed: steel/cable/jewelry) NO tienen
-      // consumidor real — ni la población ni las industrias compran sus
-      // outputs. La `consumption` definida en TOWN_BASELINE para esos era
-      // consumo fantasma que vaciaba la góndola y disparaba hiperinflación
-      // por la fórmula gap-driven. Para esos bienes la demanda abstracta
-      // es 0: solo se mueven via transacciones reales (sellFromInventory).
-      const def = PRODUCIBLES[pid];
-      const isOrphanIndustrial = def?.commodityType === 'material' && def?.processStage === 'processed';
-      // Para el resto: cap a lo que realmente existe (supply + góndola). Sin
-      // este cap, items extintos con supply=0 igual hacen consume → stock
-      // negativo lógico → gap=1 → price explota.
-      const rawDemand = isOrphanIndustrial ? 0 : (c.consumption[pid] || 0) * prefMod;
-      const demand = Math.min(rawDemand, supply + stockOnShelf);
+      const demand = (c.consumption[pid] || 0) * prefMod;
       const net = supply - demand;
       const tradeBalance = -net;
 
@@ -181,15 +168,6 @@ export function tickMarket(state) {
     for (const pid of PRODUCIBLE_IDS) {
       const target = m.targetStock[cid][pid] || 50;
       const inv = m.inventory[cid][pid] || 0;
-      // Item extinto: sin supply hoy, sin góndola. La fórmula gap-driven leería
-      // inv=0/target=20 → gap=1 → price sube ~3%/día indefinidamente sin que
-      // exista nada para anclar el valor. Freezear el precio mientras el item
-      // no exista; reanuda la actualización cuando alguien vuelva a producirlo
-      // o aparezca stock.
-      if (inv === 0 && (c.supplyToday[pid] || 0) === 0) {
-        m.history[cid][pid].push(m.prices[cid][pid]);
-        continue;
-      }
       const gap = (target - inv) / target;
       const noise = (Math.random() * 2 - 1) * MARKET.noiseAmp;
       let newPrice = m.prices[cid][pid] * (1 + gap * MARKET.responsiveness + noise);

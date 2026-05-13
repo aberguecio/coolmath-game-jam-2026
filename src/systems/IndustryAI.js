@@ -117,28 +117,7 @@ export function aiSellIndustryOutputs(state, ai) {
       const have = inv[pid] || 0;
       const sell = Math.max(0, Math.floor(have - recipe.outputs[pid] * 5));
       if (sell <= 0) continue;
-      // Try the normal sale at spot. The mayorista (marketPool) pays the AI.
-      const r = sellFromInventory(state, ai.id, pid, sell, cid);
-      if (r.ok) continue;
-      // Sale failed — almost always because the marketPool is dry for an
-      // industrial output that has no real consumer (steel/cable/jewelry).
-      // Without intervention, the stock stays frozen in off-market forever,
-      // marketStock=0 → gap=1 every day → spot price compounds upward
-      // unbounded (the hyperinflation bug we reproduced live).
-      //
-      // Fix: write-off. AI dumps the units onto the shelf at zero payment.
-      // The mayorista technically "got it for free" — la industria se traga
-      // la pérdida porque no encuentra comprador real. This is what makes
-      // marketStock actually grow when there's no demand. Once it grows past
-      // target, the gap formula turns negative and price falls toward
-      // absoluteMinPrice. Monthly margin of the industry collapses,
-      // aiTryCloseIndustry shuts it down. Conservation safe: no cash created
-      // or destroyed — pure stock movement.
-      if (have >= sell) {
-        inv[pid] = have - sell;
-        if (!state.market.inventory[cid]) state.market.inventory[cid] = {};
-        state.market.inventory[cid][pid] = (state.market.inventory[cid][pid] || 0) + sell;
-      }
+      sellFromInventory(state, ai.id, pid, sell, cid);
     }
   }
 }
