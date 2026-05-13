@@ -215,14 +215,6 @@ export function tickExporters(state) {
   }
 }
 
-// Public selectors used by UI.
-export function exportersByCountry(state, cid) {
-  return (state.exporters || []).filter(e => e.homeCountryId === cid);
-}
-export function allInFlightFor(state, exporter) {
-  return exporter?.inFlight ?? [];
-}
-
 // Seed N AI exporters per town at world init. Called from WorldSeed.
 export function seedExportersFor(state, countryId, count) {
   const startName = (state.exporters?.length || 0);

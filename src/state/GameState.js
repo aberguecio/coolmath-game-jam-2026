@@ -159,10 +159,6 @@ export function persistTutorial(state) {
   try { localStorage.setItem(TUTORIAL_LS_KEY, JSON.stringify(state.tutorial)); } catch {}
 }
 
-export function resetTutorial() {
-  try { localStorage.removeItem(TUTORIAL_LS_KEY); } catch {}
-}
-
 export function createInitialState() {
   validateRegistries();
 
@@ -262,8 +258,6 @@ export function createInitialState() {
       preferenceCrush: 0,
       wageHaircutMonths: 0,
     };
-    c.dailyNutritionConsumed = 0;
-    c.dailyNutritionNeed = c.population * WAGES.dailyFoodCostPerCapita * 0.25;
     // Labor market — Sprint A. wageRate emerges from demand/supply via tickLaborMarket.
     c.wageRate = WAGES.baseWage;
     c.wageRateHistory = [WAGES.baseWage];
@@ -306,15 +300,6 @@ export function unregisterWallet(state, id) {
 // =============================================================================
 // Helpers used across systems
 // =============================================================================
-export function allTiles(state) {
-  const out = [];
-  for (const cid of COUNTRY_IDS) {
-    const m = state.maps?.[cid];
-    if (m) for (const t of m.tiles) out.push(t);
-  }
-  return out;
-}
-
 export function tileById(state, countryId, tileId) {
   return state.maps?.[countryId]?.tiles?.[tileId] ?? null;
 }
@@ -417,13 +402,6 @@ export function logEvent(state, entry) {
 export function pushFx(state, event) {
   if (!state.fxQueue) state.fxQueue = [];
   state.fxQueue.push(event);
-}
-
-// Append to the dev ledger ring; oldest entries fall off after ~200.
-export function pushLedger(state, entry) {
-  if (!state.ledger) state.ledger = [];
-  state.ledger.push({ day: state.time.totalDays, ...entry });
-  if (state.ledger.length > 200) state.ledger.shift();
 }
 
 // Append AI decision log (one per company × producible/industry consideration).

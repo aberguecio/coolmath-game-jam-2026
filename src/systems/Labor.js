@@ -75,15 +75,6 @@ export function laborDemandFor(state, cid) {
 //
 // Why this is needed: country populations vary 280× (home=5 vs china=1400)
 // while seeded industries are uniform across countries. A linear ratio gives
-// home tightness ≈ 72 (wage runs to infinity) and china ≈ 0.003 (wage to 0).
-// Sqrt compresses both extremes to playable ranges without bounding either.
-export function tightnessFor(state, cid) {
-  const supply = laborSupplyFor(state, cid);
-  if (supply <= 0) return 1;
-  const raw = laborDemandFor(state, cid) / supply;
-  return Math.sqrt(Math.max(0, raw));
-}
-
 export function wageRateFor(state, cid) {
   return state.countries?.[cid]?.wageRate ?? WAGES.baseWage;
 }

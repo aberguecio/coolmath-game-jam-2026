@@ -17,8 +17,6 @@ export function populationSpend(state) {
     const m = state.market;
     if (!reg || !c) continue;
 
-    c.dailyNutritionConsumed = 0;
-
     const candidates = [];
     for (const pid of PRODUCIBLE_IDS) {
       if (!isFood(pid)) continue;
@@ -61,9 +59,7 @@ export function populationSpend(state) {
       });
       if (!r.ok) continue;
       m.inventory[cid][cand.pid] -= buyUnits;
-      c.dailyNutritionConsumed += buyUnits * cand.nutrition;
-      // Per-country daily consumption counter for the market snapshot CSV.
-      // Parallel to the global m.dailyConsumption; both stay in sync.
+      // Per-country daily consumption counter — alimenta el market snapshot CSV.
       if (!c.consumptionDay) c.consumptionDay = {};
       c.consumptionDay[cand.pid] = (c.consumptionDay[cand.pid] || 0) + buyUnits;
       budget -= (r.grossRevenue + r.taxPaid);

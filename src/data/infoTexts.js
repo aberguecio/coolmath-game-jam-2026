@@ -80,6 +80,3 @@ export const INFO_TEXTS = {
   },
 };
 
-export function getInfo(key) {
-  return INFO_TEXTS[key] ?? { title: key, body: '(no description)' };
-}

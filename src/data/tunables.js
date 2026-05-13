@@ -201,17 +201,6 @@ export const FISCAL_CRISIS = {
 
 // Cross-country logistics. Per-pair distances + per-unit shipping fee live in distances.js.
 
-// Housing / city annexation: Section 9 of the plan — develop a halo tile (180d), list it for
-// sale, the country's housing market buys when population pressure rises.
-export const HOUSING = {
-  developCost: 4000,
-  developmentDays: 180,
-  housingBase: 12000,            // base price of a developed lot
-  proximityMaxBoost: 1.6,        // closer to city center → up to this multiplier
-  scarcityFloor: 0.5,            // when many lots available, price never drops below this × base
-  scarcityCeiling: 4.0,          // when very few lots, never exceeds this × base
-};
-
 // Stock holding for processed/raw inventory in industries (overflow buffer if needed).
 export const INDUSTRY = {
   // ROI threshold for AI to build a new industry (per month, on buildCost).
@@ -231,6 +220,4 @@ export const INDUSTRY = {
   reopenCostFactor: 0.3,
 };
 
-// AI decision log buffer size (per company).
-export const AI_DECISION_LOG_MAX = 20;
 

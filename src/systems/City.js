@@ -39,11 +39,3 @@ export function lotePrice(tile, city) {
   return Math.round(CITY.loteBasePrice * mult * Math.sqrt(popMult));
 }
 
-// Estado inicial expuesto para que GameState lo importe.
-export function createCityState() {
-  return {
-    x: CITY.x,
-    y: CITY.y,
-    population: CITY.startPopulation,
-  };
-}

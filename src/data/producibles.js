@@ -218,13 +218,6 @@ export const PRODUCIBLE_IDS = Object.keys(PRODUCIBLES);
 export function isFood(producibleId) {
   return PRODUCIBLES[producibleId]?.commodityType === 'food';
 }
-export function isRaw(producibleId) {
-  return PRODUCIBLES[producibleId]?.processStage === 'raw';
-}
-export function isProcessed(producibleId) {
-  const p = PRODUCIBLES[producibleId];
-  return p && (p.processStage === 'processed' || p.processStage === 'final');
-}
 // Tile-buildable producibles only (excludes processed-only outputs).
 export function isTileGrowable(producibleId) {
   const p = PRODUCIBLES[producibleId];

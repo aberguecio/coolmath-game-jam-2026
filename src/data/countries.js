@@ -16,17 +16,15 @@
 
 export const PLAYER_COUNTRY_ID = 'home';
 
-// Baseline shared by every town. Modelled on the old "Home" values.
+// Baseline shared by every town. La oferta de bienes corre por agentes
+// reales (AI farmers, AI miners, AI industries). `consumption` queda como
+// sizing-parameter para targetStock (góndola buffer) + peso del basket de
+// priceIndex + escalado por crecimiento poblacional, NO drena la góndola.
 const TOWN_BASELINE = {
   population: 2000,
   populationGrowth: 0.010,
   supplyResponsiveness: 2.0,
   taxRatesId: 'homeRates',
-  domesticProduction: {
-    wheat: 4, corn: 2, apple: 1, potato: 3, cherry: 0.4,
-    copper: 0.1, iron: 0.6, gold: 0.01,
-    flour: 0, juice: 0, jewelry: 0, steel: 0, cable: 0, pie: 0,
-  },
   consumption: {
     wheat: 8, corn: 6, apple: 2, potato: 6, cherry: 0.8,
     copper: 0.4, iron: 2.0, gold: 0.03,
@@ -50,5 +48,4 @@ export const COUNTRIES = {
   germany: makeTown('germany', 'Hillcrest', 0xe8e6a0, ['jewelryShop']),
 };
 
-export const COUNTRY_LIST = Object.values(COUNTRIES);
 export const COUNTRY_IDS = Object.keys(COUNTRIES);

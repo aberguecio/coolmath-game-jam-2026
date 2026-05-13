@@ -36,10 +36,6 @@ export function setSpeed(state, idx) {
   state.time.paused = TIME.speeds[state.time.speedIdx] === 0;
 }
 
-export function togglePause(state) {
-  state.time.paused = !state.time.paused;
-}
-
 export function formatDate(state) {
   const t = state.time;
   return `${String(t.day).padStart(2, '0')}/${String(t.month).padStart(2, '0')}/${t.year}`;

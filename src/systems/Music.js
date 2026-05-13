@@ -133,11 +133,6 @@ export function startMusic() {
   scheduleLoop();
 }
 
-export function stopMusic() {
-  isPlaying = false;
-  if (scheduler) { clearTimeout(scheduler); scheduler = null; }
-}
-
 export function toggleMute() {
   isMuted = !isMuted;
   if (masterGain) {

@@ -6,10 +6,6 @@ import { tilePrice, pushLog, pushFx } from '../state/GameState.js';
 // Pure helpers
 // =============================================================================
 
-export function getProduct(productId) {
-  return LOAN_PRODUCTS[productId];
-}
-
 export function eligibleProducts(state, opts = {}) {
   return LOAN_PRODUCT_LIST.filter(p => p.eligibility(state, opts).ok);
 }

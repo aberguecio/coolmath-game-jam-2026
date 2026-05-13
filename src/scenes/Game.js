@@ -13,7 +13,7 @@ import { tickClock, setSpeed, formatDate } from '../systems/Clock.js';
 import {
   tickMarket, priceTrend, tickCountriesYearly,
   sellFromInventory, buyFromGlobal, inventoryOf,
-  effectiveProductionFor, elasticityFor, elasticityTargetFor,
+  elasticityFor, elasticityTargetFor,
   populationSpend, marketInventoryOf, tradeFlowVolume,
   offMarketInventoryFor,
 } from '../systems/Market.js';
@@ -1450,13 +1450,13 @@ export class Game extends Phaser.Scene {
       }).setOrigin(0, 0.5).setDepth(57);
       this.chartGroup.add(nameTxt); this.chartLabels.push(nameTxt);
 
-      const effProd = effectiveProductionFor(s, countryId, def.id);
       const elasticity = elasticityFor(s, countryId, def.id);
       const target = elasticityTargetFor(s, countryId, def.id);
       const consDaily = run.consumption[def.id] || 0;
+      const supplyToday = run.supplyToday?.[def.id] || 0;
       const drift = target > elasticity + 0.05 ? '→' : target < elasticity - 0.05 ? '←' : '·';
       const breakdown =
-        `${effProd.toFixed(1)}p ×${elasticity.toFixed(2)}${drift}${target.toFixed(2)} / ${consDaily.toFixed(1)}c`;
+        `+${supplyToday.toFixed(1)}u ×${elasticity.toFixed(2)}${drift}${target.toFixed(2)} / ${consDaily.toFixed(1)}c`;
       const breakdownTxt = this.add.text(x + 20, midY + 8, breakdown, {
         fontFamily: 'monospace', fontSize: '8px',
         color: elasticity > 1.05 ? '#8cffaa' : elasticity < 0.95 ? '#ff8c8c' : '#7a8694',

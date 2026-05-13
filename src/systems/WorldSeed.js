@@ -37,7 +37,9 @@ function pickMineralTile(state, cid, mineralId) {
   return null;
 }
 
-export function seedStarterProduction(state) {
+// Internal: hace el trabajo real. Se expone públicamente vía seedIndustries
+// abajo (único nombre que los callers usan).
+function seedStarterProduction(state) {
   if (state.starterSeeded) return;
   state.starterSeeded = true;
   for (const cid of COUNTRY_IDS) {

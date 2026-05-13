@@ -133,12 +133,3 @@ export function growthMultiplier(state) {
   return m;
 }
 
-// Legacy hook — price shocks now live in country preference modifiers, not a multiplier.
-export function priceShockFor() { return 1; }
-
-export function activeEventLabels(state) {
-  return state.activeEvents.map(e => {
-    const def = EVENT_TYPES[e.type];
-    return `${def?.label ?? e.type} (${e.daysRemaining}d)`;
-  });
-}

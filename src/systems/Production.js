@@ -38,21 +38,10 @@ export function tickProductionDecisions(state) {
   }
 }
 
-export function effectiveProduction(state, country, producibleId) {
-  const base = country.production[producibleId] || 0;
-  if (base <= 0) return 0;
-  if (!isTileGrowable(producibleId)) return base;
-  const log = country.decisionLog?.[producibleId];
-  const scale = (log && log.length > 0) ? log[0] : 1.0;
-  return base * scale;
-}
-
-export function effectiveProductionFor(state, countryId, producibleId) {
-  const c = state.countries[countryId];
-  if (!c) return 0;
-  return effectiveProduction(state, c, producibleId);
-}
-
+// Elasticity helpers — leen el decisionLog (cobweb delay) que produce
+// tickProductionDecisions. Quien materializa la oferta son los agentes
+// reales (AI farmers en aiTryHarvestAndPlant); estos getters son sólo
+// para UI y diagnóstico.
 export function elasticityFor(state, countryId, producibleId) {
   const c = state.countries[countryId];
   if (!c) return 1;

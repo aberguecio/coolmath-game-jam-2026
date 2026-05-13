@@ -1,6 +1,6 @@
 import { PRODUCIBLES } from '../data/producibles.js';
 import { LAND_ACTIONS, FISCAL_CRISIS, FARMING } from '../data/tunables.js';
-import { sellToMarket, harvestToInventory } from './Market.js';
+import { harvestToInventory, sellFromInventory } from './Market.js';
 import { applyForLoan, quoteLoan, walletFor } from './Bank.js';
 import { tilePrice, pushLog, pushFx } from '../state/GameState.js';
 import { lotePrice, isInsideHalo } from './City.js';
@@ -412,12 +412,15 @@ export function toggleAutoReplant(state, tile) {
 export function harvestTile(state, tile) {
   if (tile.owner !== 'player') return { ok: false };
   if (tile.state !== 'mature') return { ok: false, reason: 'Not yet mature' };
-  const def = PRODUCIBLES[tile.crop];
+  const cropId = tile.crop;
+  const def = PRODUCIBLES[cropId];
   const units = expectedYield(def, effectiveQualityFor(def, tile));
-  // Route revenue through the country where the tile actually lives — fixes wrong pool
-  // when player owns tiles abroad (future-proof; today player only home).
-  const revenue = sellToMarket(state, tile.crop, units, tile.countryId);
-  state.player.cash += revenue;
+  // SOLID/LSP: misma ruta que la AI — la cosecha aterriza en el inventario
+  // del player y la venta pasa por sellFromInventory → executeTransaction,
+  // así el marketPool del país paga (y cobra impuestos) en lugar de generar
+  // cash fiat. Si el pool está seco, las unidades quedan en inventario y el
+  // player puede vender después desde el Market modal.
+  harvestToInventory(state, 'player', cropId, units, tile.countryId);
   tile.lastHarvestDay = state.time.totalDays;
   tile.matureSinceDay = null;                       // clear grace timer
   tile.skipStreak = 0;
@@ -430,8 +433,14 @@ export function harvestTile(state, tile) {
     tile.crop = null;
     tile.growth = 0;
   }
-  pushLog(state, `Harvested ${units}u of ${def.name} → $${revenue}`);
-  return { ok: true, units, revenue };
+
+  const r = sellFromInventory(state, 'player', cropId, units, tile.countryId);
+  if (r.ok) {
+    pushLog(state, `Harvested ${units}u of ${def.name} → sold for $${Math.round(r.revenue)}`);
+    return { ok: true, units, revenue: r.revenue };
+  }
+  pushLog(state, `Harvested ${units}u of ${def.name} → kept in inventory (${r.reason})`);
+  return { ok: true, units, revenue: 0, kept: true };
 }
 
 export function loteTile(state, tile) {

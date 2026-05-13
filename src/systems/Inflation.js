@@ -3,7 +3,6 @@
 // composes price-index and (post Sprint A) wage-rate getters into the cost
 // functions other systems consume.
 
-import { COUNTRY_IDS } from '../data/countries.js';
 import { LAND_ACTIONS, MINERALS } from '../data/tunables.js';
 import { priceIndexFor } from './PriceIndex.js';
 import { wageRateFor } from './Labor.js';
@@ -64,22 +63,3 @@ export function effectiveMonthlyOpCost(state, cid, def) {
   return Math.round((def?.monthlyLabor || 0) * wageRateFor(state, cid));
 }
 
-// Country money-pool accessor (not strictly inflation, but adjacent and used
-// by UI/audit code). Keep here for backwards compat.
-export function marketPoolFor(state, countryId) {
-  return state.countries?.[countryId]?.marketPool ?? 0;
-}
-
-// Diagnostic — sum of all wallets + per-country pools. Should drift only from
-// the transport sink and net loan flow with the closed-loop economy.
-export function totalMoneySupply(state) {
-  let total = 0;
-  if (state.player) total += state.player.cash || 0;
-  if (state.aiFarmers) for (const a of state.aiFarmers) total += a.cash || 0;
-  for (const cid of COUNTRY_IDS) {
-    const c = state.countries[cid];
-    if (!c) continue;
-    total += (c.wageFund || 0) + (c.treasury || 0) + (c.marketPool || 0);
-  }
-  return total;
-}

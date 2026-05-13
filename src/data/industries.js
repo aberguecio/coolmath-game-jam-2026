@@ -75,5 +75,4 @@ export const INDUSTRIES = {
   },
 };
 
-export const INDUSTRY_LIST = Object.values(INDUSTRIES);
 export const INDUSTRY_IDS = Object.keys(INDUSTRIES);

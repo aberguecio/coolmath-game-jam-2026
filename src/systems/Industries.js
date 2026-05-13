@@ -219,7 +219,7 @@ export function tickIndustrySalaries(state) {
 // Re-exports for callers that historically imported everything from Industries.
 // =============================================================================
 export { tickFiscalCrisis } from './FiscalCrisis.js';
-export { seedStarterProduction, seedIndustries } from './WorldSeed.js';
+export { seedIndustries } from './WorldSeed.js';
 export {
   aiTryBuildIndustry, aiTryCloseIndustry, aiTryReopenIndustry,
   aiTopUpIndustryInputs, aiSellIndustryOutputs,
