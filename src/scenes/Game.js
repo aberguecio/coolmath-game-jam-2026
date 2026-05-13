@@ -1549,7 +1549,7 @@ export class Game extends Phaser.Scene {
     // ============================================================
     const headerY = marketTop;
     ls(colA, headerY, '── SUPPLY vs DEMAND ──', '#7a8694', '10px');
-    ls(x + w - 200, headerY, '🟢 supply  🔴 demand', '#566370', '9px');
+    ls(x + w - 280, headerY, '🟢 local prod ░ import   🔴 local cons ░ export', '#566370', '8px');
 
     const rowsTop = marketTop + 16;
     const rowH = 36;
@@ -1561,16 +1561,21 @@ export class Game extends Phaser.Scene {
     const barAreaX = x + 20 + labelW;
     const barAreaW = w - 40 - labelW - valueW;
 
-    // Pre-compute aggregations + max for scale
+    // Pre-compute las 4 agregaciones — el invariante garantiza que
+    // sLocal + sImport === supply total y dLocal + dExport === demand total.
     const rowsAgg = rows.map(def => {
-      const supply = aggSum(run.supplyHistory?.[def.id]);
-      const demand = aggSum(run.consumptionHistory?.[def.id]);
-      return { def, supply, demand };
+      const sLocal  = aggSum(run.supplyLocalHistory?.[def.id]);
+      const sImport = aggSum(run.supplyImportHistory?.[def.id]);
+      const dLocal  = aggSum(run.consumptionLocalHistory?.[def.id]);
+      const dExport = aggSum(run.consumptionExportHistory?.[def.id]);
+      return { def, sLocal, sImport, dLocal, dExport };
     });
     let maxFlow = 1;
     for (const r of rowsAgg) {
-      if (r.supply > maxFlow) maxFlow = r.supply;
-      if (r.demand > maxFlow) maxFlow = r.demand;
+      const s = r.sLocal + r.sImport;
+      const d = r.dLocal + r.dExport;
+      if (s > maxFlow) maxFlow = s;
+      if (d > maxFlow) maxFlow = d;
     }
 
     rowsAgg.forEach((agg, i) => {
@@ -1584,19 +1589,30 @@ export class Game extends Phaser.Scene {
       }).setOrigin(0, 0.5).setDepth(57);
       this.chartGroup.add(nameTxt); this.chartLabels.push(nameTxt);
 
-      // Two parallel bars stacked vertically in the row.
+      // Stacked bars: solid base color para la parte local, shade más oscuro
+      // contiguo para la parte cross-country (import en supply, export en demand).
       const barH = 9;
-      const sBarLen = (agg.supply / maxFlow) * barAreaW;
-      const dBarLen = (agg.demand / maxFlow) * barAreaW;
-      this.chartGfx.fillStyle(0x6ee79a, 0.85);
-      this.chartGfx.fillRect(barAreaX, midY - barH - 1, sBarLen, barH);
-      this.chartGfx.fillStyle(0xff6b6b, 0.85);
-      this.chartGfx.fillRect(barAreaX, midY + 1, dBarLen, barH);
+      const sLocalLen = (agg.sLocal / maxFlow) * barAreaW;
+      const sImpLen   = (agg.sImport / maxFlow) * barAreaW;
+      const dLocalLen = (agg.dLocal / maxFlow) * barAreaW;
+      const dExpLen   = (agg.dExport / maxFlow) * barAreaW;
+      // Supply bar (arriba)
+      this.chartGfx.fillStyle(0x6ee79a, 0.9);  // verde local
+      this.chartGfx.fillRect(barAreaX, midY - barH - 1, sLocalLen, barH);
+      this.chartGfx.fillStyle(0x3a7a55, 0.9);  // verde tenue import
+      this.chartGfx.fillRect(barAreaX + sLocalLen, midY - barH - 1, sImpLen, barH);
+      // Demand bar (abajo)
+      this.chartGfx.fillStyle(0xff6b6b, 0.9);  // rojo local
+      this.chartGfx.fillRect(barAreaX, midY + 1, dLocalLen, barH);
+      this.chartGfx.fillStyle(0x7a3a3a, 0.9);  // rojo tenue export
+      this.chartGfx.fillRect(barAreaX + dLocalLen, midY + 1, dExpLen, barH);
       // Axis line
       this.chartGfx.lineStyle(1, 0x3a4d63, 0.6);
       this.chartGfx.lineBetween(barAreaX, midY + barH + 2, barAreaX + barAreaW, midY + barH + 2);
 
-      const net = agg.supply - agg.demand;
+      const supply = agg.sLocal + agg.sImport;
+      const demand = agg.dLocal + agg.dExport;
+      const net = supply - demand;
       const netColor = net > 0.5 ? '#8cffaa' : net < -0.5 ? '#ff8c8c' : '#7a8694';
       const netSign = net > 0 ? '+' : '';
       const netTxt = this.add.text(barAreaX + barAreaW + 6, midY,

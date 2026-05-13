@@ -9,6 +9,7 @@ import { COUNTRIES, COUNTRY_IDS } from '../data/countries.js';
 import { effectiveTaxRates } from '../data/taxRates.js';
 import { WAGES } from '../data/tunables.js';
 import { executeTransaction } from './Transactions.js';
+import { recordConsumption } from './Market.js';
 
 export function populationSpend(state) {
   for (const cid of COUNTRY_IDS) {
@@ -72,11 +73,10 @@ export function populationSpend(state) {
       });
       if (!r.ok) continue;
       m.inventory[cid][cand.pid] -= buyUnits;
-      // Per-country daily consumption counter — feeding (1) market snapshot
-      // CSV y (2) el ring buffer consumptionHistory que alimenta el target
-      // dinámico en recomputeTargetStocks. Mismo counter para ambos consumers.
-      if (!c.consumptionDay) c.consumptionDay = {};
-      c.consumptionDay[cand.pid] = (c.consumptionDay[cand.pid] || 0) + buyUnits;
+      // Registrar como consumo local — la población siempre es local por design.
+      // Pasa por recordConsumption (mismo helper que buyFromGlobal) → mantiene
+      // el invariante consumptionHistory === consumptionLocalHistory + consumptionExportHistory.
+      recordConsumption(c, cand.pid, buyUnits, /* isExport */ false);
       nutritionAcquired += buyUnits * cand.nutrition;
       budget -= (r.grossRevenue + r.taxPaid);
     }

@@ -12,7 +12,7 @@ import { EXPORTER_NAMES, EXPORTER_COLORS } from '../data/exporters.js';
 import { transportCost, distanceBetween } from '../data/distances.js';
 import { COUNTRY_IDS, COUNTRIES } from '../data/countries.js';
 import { pushLog, registerWallet, unregisterWallet } from '../state/GameState.js';
-import { executeTransaction } from './Transactions.js';
+import { buyFromGlobal, sellFromInventory, writeOffToMarket, inventoryFor } from './Market.js';
 
 let _nextId = 1;
 function nextExporterId(homeCountryId) {
@@ -74,29 +74,25 @@ export function exporterStartShipment(state, exporter, plan) {
     }
   }
 
-  const srcPrice = state.market.prices?.[srcCid]?.[pid] || 0;
-  if (srcPrice <= 0) return { ok: false, reason: 'No src price' };
-
   const srcStock = state.market.inventory?.[srcCid]?.[pid] || 0;
   if (srcStock < units) return { ok: false, reason: 'Src out of stock' };
 
-  // BUY in source. executeTransaction handles b2b tax + marketPool routing.
-  // Transport cost is NOT charged here because src==tx so the helper sees
-  // sellerCountryId == countryOfTransaction. We add transport separately.
-  const r = executeTransaction(state, {
-    sellerId: 'foreign', buyerId: exporter.id,
-    productId: pid, units, unitPrice: srcPrice,
-    countryOfTransaction: srcCid, sellerCountryId: srcCid,
-    type: 'b2b',
-  });
+  // BUY canónico en source vía buyFromGlobal. crossCountry=true → registra el
+  // pickup como EXPORT en srcCid (el cargo va a salir del país). buyFromGlobal
+  // se encarga de: cobrar al exporter wallet, descontar marketStock, escribir
+  // counters totals + export component vía _recordConsumption.
+  const r = buyFromGlobal(state, exporter.id, pid, units, srcCid, { crossCountry: true });
   if (!r.ok) return { ok: false, reason: r.reason };
+  const srcPrice = r.price;
 
-  // Physical: goods leave src market inventory immediately. Re-enter dst's
-  // inventory at settlement (in tickExporters).
-  state.market.inventory[srcCid][pid] = Math.max(0, srcStock - units);
+  // El cargo va a la cola inFlight, no al inventario regular del exporter.
+  // Transferimos: las units pasaron del marketStock al exporter wallet via
+  // buyFromGlobal — ahora salen del wallet y entran a inFlight. Conservación
+  // de stock: marketStock−units → wallet+units → wallet−units → inFlight+units.
+  const inv = inventoryFor(exporter, srcCid);
+  inv[pid] = (inv[pid] || 0) - units;
 
-  // Shipping fee — the freight company. Sink (same convention as the old
-  // arbitrage's transport leak).
+  // Shipping fee — freight company. Sink (same convention as the old arbitrage).
   const tCost = transportCost(srcCid, dstCid, units);
   exporter.cash -= tCost;
 
@@ -105,7 +101,7 @@ export function exporterStartShipment(state, exporter, plan) {
 
   exporter.inFlight.push({
     srcCid, dstCid, pid, units, etaDay,
-    costPaid: (r.grossRevenue + r.taxPaid + tCost),
+    costPaid: r.cost + tCost,
     srcPrice,
   });
   return { ok: true, etaDay };
@@ -127,47 +123,40 @@ export function exporterStartShipment(state, exporter, plan) {
 function settleShipment(state, exporter, cargo) {
   const { dstCid, pid, units, costPaid, srcCid } = cargo;
   const dstCountry = state.countries[dstCid];
-  if (!state.market.inventory[dstCid]) state.market.inventory[dstCid] = {};
   if (!state.tradeFlows) state.tradeFlows = [];
 
-  const dstPrice = state.market.prices?.[dstCid]?.[pid] || 0;
-  const pool = dstCountry?.marketPool || 0;
+  // 1) Cargo arrives → depositar en inventario regular del exporter.
+  //    Las 3 rutas de venta abajo van a salir de este inventario y entrar
+  //    a la góndola via el rail canónico (supplyToday → marketStock en
+  //    el próximo tickMarket). 1-día de lag consistente con todo el motor.
+  const inv = inventoryFor(exporter, dstCid);
+  inv[pid] = (inv[pid] || 0) + units;
 
-  // Try a normal-price sale first. executeTransaction does its own pool check.
-  let revenue = 0;
-  let outcome = 'dumped';
-  let salePrice = dstPrice;
+  // 2) Sale al precio spot del destino. crossCountry=true → registra como
+  //    IMPORT en dstCid.
+  let r = sellFromInventory(state, exporter.id, pid, units, dstCid, { crossCountry: true });
+  let outcome = r.ok ? 'sold' : 'pending';
+  let revenue = r.ok ? r.revenue : 0;
 
-  const tryAtPrice = (price) => {
-    if (price <= 0) return null;
-    const r = executeTransaction(state, {
-      sellerId: exporter.id, buyerId: 'foreign',
-      productId: pid, units, unitPrice: price,
-      countryOfTransaction: dstCid, sellerCountryId: dstCid,
-      type: 'import',
-    });
-    return r.ok ? r : null;
-  };
-
-  let r = tryAtPrice(dstPrice);
-  if (r) {
-    revenue = r.grossRevenue;
-    outcome = 'sold';
-  } else if (dstPrice > 0 && pool > 0) {
-    // Fire sale: highest unit price that fits the pool (with 20% slack for
-    // tax overhead that executeTransaction adds on top).
-    const fireUnitPrice = Math.max(0.01, (pool * 0.8) / Math.max(1, units));
-    salePrice = Math.min(dstPrice, fireUnitPrice);
-    r = tryAtPrice(salePrice);
-    if (r) {
-      revenue = r.grossRevenue;
-      outcome = 'fire-sale';
+  // 3) Fallback fire-sale: precio que el pool destino puede pagar (20% slack
+  //    para el tax overhead que executeTransaction agrega arriba).
+  if (!r.ok) {
+    const pool = dstCountry?.marketPool || 0;
+    if (pool > 0) {
+      const fireUnitPrice = Math.max(0.01, (pool * 0.8) / Math.max(1, units));
+      r = sellFromInventory(state, exporter.id, pid, units, dstCid, {
+        crossCountry: true, unitPrice: fireUnitPrice,
+      });
+      if (r.ok) { outcome = 'fire-sale'; revenue = r.revenue; }
     }
   }
 
-  // Goods physically enter dst market inventory in every outcome. Cash flow
-  // already happened above (or was zero for the dump path).
-  state.market.inventory[dstCid][pid] = (state.market.inventory[dstCid][pid] || 0) + units;
+  // 4) Last resort: pool roto. Write-off — exporter eats full loss pero las
+  //    unidades entran igual a la góndola via supplyToday (mismo invariante).
+  if (!r.ok) {
+    const w = writeOffToMarket(state, exporter.id, pid, units, dstCid, { crossCountry: true });
+    if (w.ok) { outcome = 'dumped'; revenue = 0; }
+  }
 
   state.tradeFlows.push({
     day: state.time.totalDays,

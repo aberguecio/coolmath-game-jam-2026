@@ -18,6 +18,7 @@
 import { PRODUCIBLES } from '../data/producibles.js';
 import { effectiveTaxRates } from '../data/taxRates.js';
 import { transportCost } from '../data/distances.js';
+import { PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { logEvent } from '../state/GameState.js';
 
 export function walletOf(state, ownerId) {
@@ -31,6 +32,18 @@ export function walletOf(state, ownerId) {
   return state.wallets?.[ownerId]
     ?? state.aiFarmers?.find(a => a.id === ownerId)
     ?? null;
+}
+
+// Single source of truth: "¿en qué país vive el wallet?". Lo usan los helpers
+// canónicos para categorizar transacciones como local vs cross-country.
+// AI farmer usa `countryId`, exporter usa `homeCountryId`, player es PLAYER.
+// Sistema actors (population, treasury, foreign) no tienen país asignado.
+export function walletCountryFor(state, ownerId) {
+  if (ownerId === 'player') return PLAYER_COUNTRY_ID;
+  if (ownerId === 'population' || ownerId === 'treasury' || ownerId === 'foreign') return null;
+  const w = state.wallets?.[ownerId] ?? state.aiFarmers?.find(a => a.id === ownerId);
+  if (!w) return null;
+  return w.countryId ?? w.homeCountryId ?? null;
 }
 
 export function executeTransaction(state, params) {

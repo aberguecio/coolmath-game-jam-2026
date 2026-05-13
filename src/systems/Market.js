@@ -8,7 +8,7 @@ import { MARKET, ECONOMY_DEFAULTS, WAGES } from '../data/tunables.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { tickPriceIndex } from './PriceIndex.js';
-import { executeTransaction, walletOf } from './Transactions.js';
+import { executeTransaction, walletOf, walletCountryFor } from './Transactions.js';
 import { recordMarketSnapshot } from './MarketHistory.js';
 import { tickProductionDecisions } from './Production.js';
 
@@ -31,10 +31,23 @@ export function createCountriesState() {
       taxRatesId: c.taxRatesId,
       population: c.population,
       consumption: { ...c.consumption },     // seed inicial del consumptionHistory + peso del basket de priceIndex + escalado por eventos/yearly. Ya NO drena marketStock (la limpieza lo sacó).
-      consumptionHistory: {},                // ring buffer 90 días de compras reales por pid; alimenta target dinámico
-      supplyHistory: {},                     // ring buffer 90 días de ventas reales por pid; espejo de consumptionHistory para UI
-      supplyToday: {},                       // unidades vendidas hoy por agentes reales; tickMarket las traslada a m.inventory y resetea al final
-      consumptionDay: {},                    // unidades compradas hoy por agentes reales; rotado al consumptionHistory cada día
+      // === Flow counters (totales + componentes local/cross-country) =============
+      // Invariante: supplyHistory[pid][i] === supplyLocalHistory[pid][i] + supplyImportHistory[pid][i]
+      //             consumptionHistory[pid][i] === consumptionLocalHistory[pid][i] + consumptionExportHistory[pid][i]
+      // Toda escritura pasa por _recordSupply/_recordConsumption (escriben total y componente atómicos).
+      consumptionHistory: {},                // ring 90d: TOTAL compras reales por pid (alimenta target dinámico)
+      consumptionLocalHistory: {},           // ring 90d: compras hechas por buyer del mismo país (pop + industrias locales + player)
+      consumptionExportHistory: {},          // ring 90d: compras hechas por buyer de otro país (exporters llevándose)
+      supplyHistory: {},                     // ring 90d: TOTAL ventas reales por pid
+      supplyLocalHistory: {},                // ring 90d: ventas por agente del mismo país (granjeros/mineros/industrias locales)
+      supplyImportHistory: {},               // ring 90d: ventas por agente de otro país (exporters entregando cargo)
+      // Acumuladores del día actual — rotados a sus _History al inicio de cada tickMarket.
+      supplyToday: {},
+      consumptionDay: {},
+      supplyLocalToday: {},
+      supplyImportToday: {},
+      consumptionLocalToday: {},
+      consumptionExportToday: {},
       preferenceModifiers: {},
       tradeBalanceEMA: {},
       decisionLog: {},
@@ -53,13 +66,51 @@ export function createCountriesState() {
       // Seed consumptionHistory con 90 días de baseline. Esto da un punto de
       // partida coherente al day 0 (target ≈ baseline × 30) y se reemplaza
       // gradualmente con flujo real conforme la población compra a lo largo
-      // de los siguientes 3 meses.
+      // de los siguientes 3 meses. La población siempre es local → seed va al
+      // componente local; el componente export arranca en cero.
       const seed = c.consumption[pid] || 0;
       runtime[id].consumptionHistory[pid] = new Array(90).fill(seed);
-      runtime[id].supplyHistory[pid] = new Array(90).fill(0);  // sin seed: la oferta arranca en cero
+      runtime[id].consumptionLocalHistory[pid] = new Array(90).fill(seed);
+      runtime[id].consumptionExportHistory[pid] = new Array(90).fill(0);
+      runtime[id].supplyHistory[pid] = new Array(90).fill(0);
+      runtime[id].supplyLocalHistory[pid] = new Array(90).fill(0);
+      runtime[id].supplyImportHistory[pid] = new Array(90).fill(0);
     }
   }
   return runtime;
+}
+
+// =============================================================================
+// Counter writes — single source of truth para "una venta/compra ocurrió hoy"
+// =============================================================================
+// _recordSupply/_recordConsumption escriben atómicamente el total Y el componente
+// (local xor cross-country). Esto garantiza por construcción el invariante:
+//   supplyHistory[pid][i]      === supplyLocalHistory[pid][i]      + supplyImportHistory[pid][i]
+//   consumptionHistory[pid][i] === consumptionLocalHistory[pid][i] + consumptionExportHistory[pid][i]
+// Cualquier escritura a supplyToday/consumptionDay desde el motor pasa por acá —
+// si algún caller futuro escribe directo, `grep _recordSupply` lo encuentra al toque.
+function _recordSupply(country, pid, units, isImport) {
+  if (!country || units <= 0) return;
+  country.supplyToday = country.supplyToday || {};
+  country.supplyToday[pid] = (country.supplyToday[pid] || 0) + units;
+  const k = isImport ? 'supplyImportToday' : 'supplyLocalToday';
+  country[k] = country[k] || {};
+  country[k][pid] = (country[k][pid] || 0) + units;
+}
+
+function _recordConsumption(country, pid, units, isExport) {
+  if (!country || units <= 0) return;
+  country.consumptionDay = country.consumptionDay || {};
+  country.consumptionDay[pid] = (country.consumptionDay[pid] || 0) + units;
+  const k = isExport ? 'consumptionExportToday' : 'consumptionLocalToday';
+  country[k] = country[k] || {};
+  country[k][pid] = (country[k][pid] || 0) + units;
+}
+
+// Exposed wrapper para callers fuera de Market.js (Population.js lo usa).
+// Misma semántica que el helper privado pero accesible por import.
+export function recordConsumption(country, producibleId, units, isExport = false) {
+  _recordConsumption(country, producibleId, units, isExport);
 }
 
 // =============================================================================
@@ -88,6 +139,18 @@ export function recomputeTargetStocks(state) {
     }
   }
 }
+
+// Pares (acumulador-del-día → ring de 90 días) que tickMarket rota en cada tick.
+// Mantener sincronizados los 3 niveles (total + 2 componentes local/cross-country)
+// por una sola fuente: una tabla. Para agregar un nuevo counter, una línea más.
+const ROTATE_PAIRS = [
+  ['supplyToday',             'supplyHistory'],
+  ['supplyLocalToday',        'supplyLocalHistory'],
+  ['supplyImportToday',       'supplyImportHistory'],
+  ['consumptionDay',          'consumptionHistory'],
+  ['consumptionLocalToday',   'consumptionLocalHistory'],
+  ['consumptionExportToday',  'consumptionExportHistory'],
+];
 
 export function initMarket(state) {
   const m = state.market;
@@ -127,23 +190,20 @@ export function tickMarket(state) {
   }
 
   const m = state.market;
-  // Rotar consumptionDay y supplyToday anteriores a sus ring buffers (90 días),
-  // luego resetear el día actual. supplyHistory y consumptionHistory son los
-  // dos pulsos simétricos que alimentan tanto el target dinámico como la UI
-  // del modal del país (canasta alimentaria y supply/demand por producible).
+  // Rotar los 6 counters _Today → _History (90 días) y resetear. Tabla
+  // declarativa: agregar un par nuevo es una línea más. Mantiene los 3 pares
+  // (total + 2 componentes) sincronizados sin escribir el código 6 veces.
   for (const cid of COUNTRY_IDS) {
     const c = state.countries[cid];
-    if (!c.consumptionHistory) c.consumptionHistory = {};
-    if (!c.supplyHistory) c.supplyHistory = {};
-    if (!c.consumptionDay) c.consumptionDay = {};
-    for (const pid of PRODUCIBLE_IDS) {
-      if (!c.consumptionHistory[pid]) c.consumptionHistory[pid] = [];
-      if (!c.supplyHistory[pid]) c.supplyHistory[pid] = [];
-      c.consumptionHistory[pid].push(c.consumptionDay[pid] || 0);
-      c.supplyHistory[pid].push(c.supplyToday?.[pid] || 0);
-      if (c.consumptionHistory[pid].length > 90) c.consumptionHistory[pid].shift();
-      if (c.supplyHistory[pid].length > 90) c.supplyHistory[pid].shift();
-      c.consumptionDay[pid] = 0;
+    for (const [todayKey, histKey] of ROTATE_PAIRS) {
+      if (!c[histKey]) c[histKey] = {};
+      if (!c[todayKey]) c[todayKey] = {};
+      for (const pid of PRODUCIBLE_IDS) {
+        if (!c[histKey][pid]) c[histKey][pid] = [];
+        c[histKey][pid].push(c[todayKey][pid] || 0);
+        if (c[histKey][pid].length > 90) c[histKey][pid].shift();
+        c[todayKey][pid] = 0;
+      }
     }
   }
   // Recomputar target stocks usando la history actualizada. O(países × pids)
@@ -349,14 +409,19 @@ export function harvestToInventory(state, ownerId, producibleId, units, countryI
   return units;
 }
 
-export function sellFromInventory(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
+// opts.unitPrice  → override del precio spot (fire-sale por exporters)
+// opts.crossCountry → override de la heurística walletCountryFor cuando el caller
+//                     sabe que es cross-country aunque el wallet home y countryId
+//                     coincidan (no aplica al uso normal de Exporters pero útil
+//                     como escape hatch).
+export function sellFromInventory(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID, opts = {}) {
   const wallet = walletOf(state, ownerId);
   if (!wallet) return { ok: false, reason: 'No wallet' };
   const inv = inventoryFor(wallet, countryId);
   const have = inv[producibleId] || 0;
   const sell = Math.min(Math.floor(units), have);
   if (sell <= 0) return { ok: false, reason: 'Nothing to sell here' };
-  const price = state.market.prices?.[countryId]?.[producibleId] || 0;
+  const price = opts.unitPrice ?? state.market.prices?.[countryId]?.[producibleId] ?? 0;
   if (price <= 0) return { ok: false, reason: 'No market price' };
   const r = executeTransaction(state, {
     sellerId: ownerId,
@@ -370,19 +435,20 @@ export function sellFromInventory(state, ownerId, producibleId, units, countryId
   });
   if (!r.ok) return { ok: false, reason: r.reason };
   inv[producibleId] = have - sell;
-  const country = state.countries[countryId];
-  if (country) country.supplyToday[producibleId] = (country.supplyToday[producibleId] || 0) + sell;
+  const sellerHome = walletCountryFor(state, ownerId);
+  const isImport = opts.crossCountry ?? (sellerHome != null && sellerHome !== countryId);
+  _recordSupply(state.countries[countryId], producibleId, sell, isImport);
   return { ok: true, units: sell, revenue: r.netToSeller, price };
 }
 
-export function buyFromGlobal(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
+export function buyFromGlobal(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID, opts = {}) {
   const wallet = walletOf(state, ownerId);
   if (!wallet) return { ok: false, reason: 'Wallet missing' };
   const stock = state.market.inventory?.[countryId]?.[producibleId] || 0;
   const buy = Math.min(Math.floor(units), stock);
   if (buy <= 0) return { ok: false, reason: 'Out of stock' };
   const price = state.market.prices?.[countryId]?.[producibleId] || 0;
-  const isImport = ownerId !== 'foreign' && countryId !== PLAYER_COUNTRY_ID;
+  const isImportTax = ownerId !== 'foreign' && countryId !== PLAYER_COUNTRY_ID;
   const r = executeTransaction(state, {
     sellerId: 'foreign',
     buyerId: ownerId,
@@ -391,21 +457,46 @@ export function buyFromGlobal(state, ownerId, producibleId, units, countryId = P
     unitPrice: price,
     countryOfTransaction: countryId,
     sellerCountryId: countryId,
-    type: isImport ? 'import' : 'sale',
+    type: isImportTax ? 'import' : 'sale',
   });
   if (!r.ok) return { ok: false, reason: r.reason };
   state.market.inventory[countryId][producibleId] -= buy;
-  // Registrar como demanda real para el target dinámico (industries comprando
-  // inputs, player comprando del market modal, etc.). Mismo counter que
-  // populationSpend usa — single source of truth para "qué se transó hoy".
-  const country = state.countries[countryId];
-  if (country) {
-    if (!country.consumptionDay) country.consumptionDay = {};
-    country.consumptionDay[producibleId] = (country.consumptionDay[producibleId] || 0) + buy;
-  }
+  // Categorización para tracking de flujos: ¿el buyer es de otro país?
+  // Exporters anchored al país donde compran SÍ son export (caso especial,
+  // pasan opts.crossCountry=true explícito porque la heurística no lo capta).
+  const buyerHome = walletCountryFor(state, ownerId);
+  const isExport = opts.crossCountry ?? (buyerHome != null && buyerHome !== countryId);
+  _recordConsumption(state.countries[countryId], producibleId, buy, isExport);
   const inv = inventoryFor(wallet, countryId);
   inv[producibleId] = (inv[producibleId] || 0) + buy;
   return { ok: true, units: buy, cost: r.grossRevenue + r.taxPaid + r.transportPaid, price };
+}
+
+// =============================================================================
+// Write-off: mover stock owner → marketStock SIN intercambio de dinero
+// =============================================================================
+// Mismo rail que sellFromInventory pero sin executeTransaction. La mercancía
+// pasa al supplyToday → marketStock pipeline (1 día de lag, consistente con
+// toda la oferta). Conservación de stock: las unidades salen del wallet, entran
+// a la góndola vía el pipeline canónico. Conservación de dinero: cero
+// movimiento (el seller eats the loss). Conservación del invariante:
+// _recordSupply mantiene supplyHistory === supplyLocalHistory + supplyImportHistory.
+//
+// Usado por Exporters cuando la entrega encuentra pool destino seco — antes
+// era código duplicado dentro de settleShipment. Cualquier sistema futuro que
+// necesite write-off usa esta misma función.
+export function writeOffToMarket(state, ownerId, producibleId, units, countryId, opts = {}) {
+  const wallet = walletOf(state, ownerId);
+  if (!wallet) return { ok: false, reason: 'No wallet' };
+  const inv = inventoryFor(wallet, countryId);
+  const have = inv[producibleId] || 0;
+  const sell = Math.min(Math.floor(units), have);
+  if (sell <= 0) return { ok: false, reason: 'Nothing to write off' };
+  inv[producibleId] = have - sell;
+  const sellerHome = walletCountryFor(state, ownerId);
+  const isImport = opts.crossCountry ?? (sellerHome != null && sellerHome !== countryId);
+  _recordSupply(state.countries[countryId], producibleId, sell, isImport);
+  return { ok: true, units: sell };
 }
 
 // =============================================================================
