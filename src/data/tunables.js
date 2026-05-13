@@ -188,6 +188,13 @@ export const WAGES = {
   // demand from seeded ventures.
   workersPerPopUnit: 0.5,
   emaHalfLifeDays: 60,           // smoothing window for wageRate EMA (friction, not a cap)
+  // === Nutrition target (Sprint X — dynamic consumption) ====================
+  // Each person needs this much "nutrition units" per day to survive. Foods
+  // contribute via their `nutritionUnits` field. populationSpend stops buying
+  // once acquired nutrition reaches population × NUTRITION_PER_CAPITA × WELL_BEING_FACTOR.
+  // If budget can't cover this, hunger is implicit (less consumed → target drops).
+  nutritionPerCapita: 0.3,
+  wellBeingFactor: 1.2,           // +20% over survival when they can afford it
 };
 
 export const FISCAL_CRISIS = {

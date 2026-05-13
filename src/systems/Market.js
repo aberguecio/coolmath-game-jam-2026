@@ -30,9 +30,10 @@ export function createCountriesState() {
       id,
       taxRatesId: c.taxRatesId,
       population: c.population,
-      consumption: { ...c.consumption },     // sizing parameter for targetStock + priceIndex weight + world-event scaling
+      consumption: { ...c.consumption },     // seed inicial del consumptionHistory + peso del basket de priceIndex + escalado por eventos/yearly. Ya NO drena marketStock (la limpieza lo sacó).
+      consumptionHistory: {},                // ring buffer 90 días de compras reales por pid; alimenta target dinámico
       supplyToday: {},                       // unidades vendidas hoy por agentes reales; tickMarket las traslada a m.inventory y resetea al final
-      consumptionDay: {},                    // unidades compradas hoy por agentes reales (alimenta market snapshot CSV)
+      consumptionDay: {},                    // unidades compradas hoy por agentes reales; rotado al consumptionHistory cada día
       preferenceModifiers: {},
       tradeBalanceEMA: {},
       decisionLog: {},
@@ -48,6 +49,12 @@ export function createCountriesState() {
       runtime[id].tradeBalanceEMA[pid] = 0;
       runtime[id].decisionLog[pid] = [1.0];
       runtime[id].saturatedDays[pid] = 0;
+      // Seed consumptionHistory con 90 días de baseline. Esto da un punto de
+      // partida coherente al day 0 (target ≈ baseline × 30) y se reemplaza
+      // gradualmente con flujo real conforme la población compra a lo largo
+      // de los siguientes 3 meses.
+      const seed = c.consumption[pid] || 0;
+      runtime[id].consumptionHistory[pid] = new Array(90).fill(seed);
     }
   }
   return runtime;
@@ -56,13 +63,26 @@ export function createCountriesState() {
 // =============================================================================
 // Per-country market initialization
 // =============================================================================
+// Target dinámico: 30 días del promedio diario observado en los últimos 90.
+// Si nadie compra steel en 90 días → avgDaily=0 → target=20 (floor) → cualquier
+// stock arriba de 20 satura → gap negativo → precio cae. Self-referential:
+// el target sigue al flujo real, no a un baseline impuesto.
 export function recomputeTargetStocks(state) {
   const m = state.market;
   for (const cid of COUNTRY_IDS) {
     if (!m.targetStock[cid]) m.targetStock[cid] = {};
+    const c = state.countries[cid];
     for (const pid of PRODUCIBLE_IDS) {
-      const dem = state.countries[cid].consumption[pid] || 0;
-      m.targetStock[cid][pid] = Math.max(20, Math.round(dem * MARKET.stockBufferDays));
+      const hist = c?.consumptionHistory?.[pid];
+      let avgDaily = 0;
+      if (hist && hist.length > 0) {
+        let sum = 0;
+        for (const v of hist) sum += v;
+        avgDaily = sum / hist.length;
+      }
+      // Piso de 20: evita división por cero en la gap formula y mantiene un
+      // mínimo de liquidez nominal en góndola para items dormidos.
+      m.targetStock[cid][pid] = Math.max(20, Math.round(avgDaily * MARKET.stockBufferDays));
     }
   }
 }
@@ -105,13 +125,24 @@ export function tickMarket(state) {
   }
 
   const m = state.market;
-  // Per-country daily consumption counter — reset at top of tickMarket,
-  // accumulated EXCLUSIVELY by populationSpend on real food sales (and any
-  // future real buyer that wants to flag itself here). Feeds the snapshot CSV.
+  // Rotar consumptionDay anterior al ring buffer consumptionHistory (90 días),
+  // luego resetear consumptionDay para acumular el día actual. Esto alimenta
+  // el target dinámico: lo que se compró ayer pesa en el target de mañana.
+  // Buyers reales (populationSpend, buyFromGlobal) acumulan en consumptionDay.
   for (const cid of COUNTRY_IDS) {
-    if (!state.countries[cid].consumptionDay) state.countries[cid].consumptionDay = {};
-    for (const pid of PRODUCIBLE_IDS) state.countries[cid].consumptionDay[pid] = 0;
+    const c = state.countries[cid];
+    if (!c.consumptionHistory) c.consumptionHistory = {};
+    if (!c.consumptionDay) c.consumptionDay = {};
+    for (const pid of PRODUCIBLE_IDS) {
+      if (!c.consumptionHistory[pid]) c.consumptionHistory[pid] = [];
+      c.consumptionHistory[pid].push(c.consumptionDay[pid] || 0);
+      if (c.consumptionHistory[pid].length > 90) c.consumptionHistory[pid].shift();
+      c.consumptionDay[pid] = 0;
+    }
   }
+  // Recomputar target stocks usando la history actualizada. O(países × pids)
+  // por día — barato y mantiene el target alineado al flujo observado.
+  recomputeTargetStocks(state);
 
   // Per-country: trasladar la pulsación de supply real (lo que vendieron los
   // agentes hoy) a la góndola. La drainage de la góndola ocurre directamente
@@ -358,6 +389,14 @@ export function buyFromGlobal(state, ownerId, producibleId, units, countryId = P
   });
   if (!r.ok) return { ok: false, reason: r.reason };
   state.market.inventory[countryId][producibleId] -= buy;
+  // Registrar como demanda real para el target dinámico (industries comprando
+  // inputs, player comprando del market modal, etc.). Mismo counter que
+  // populationSpend usa — single source of truth para "qué se transó hoy".
+  const country = state.countries[countryId];
+  if (country) {
+    if (!country.consumptionDay) country.consumptionDay = {};
+    country.consumptionDay[producibleId] = (country.consumptionDay[producibleId] || 0) + buy;
+  }
   const inv = inventoryFor(wallet, countryId);
   inv[producibleId] = (inv[producibleId] || 0) + buy;
   return { ok: true, units: buy, cost: r.grossRevenue + r.taxPaid + r.transportPaid, price };
@@ -376,6 +415,7 @@ export function tickCountriesYearly(state) {
     for (const pid of PRODUCIBLE_IDS) {
       c.consumption[pid] = (reg.consumption[pid] || 0) * popRatio;
     }
+    // No llamamos recomputeTargetStocks acá — corre diaria desde tickMarket
+    // ahora que el target depende del consumptionHistory dinámico.
   }
-  recomputeTargetStocks(state);
 }

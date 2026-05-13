@@ -35,17 +35,30 @@ export function populationSpend(state) {
     candidates.sort((a, b) => b.score - a.score);
 
     let budget = c.wageFund;
-    const totalPref = candidates.reduce((s, x) => s + x.pref, 0) || 1;
+    // Score-share: reparto del budget proporcional al `score`, no a la
+    // preferencia cruda. Items caros o escasos pierden share automáticamente
+    // (precio alto → score bajo) → la población migra a sustitutos sin
+    // necesidad de un cap explícito de diversidad.
+    const totalScore = candidates.reduce((s, x) => s + x.score, 0) || 1;
+    // Tope blando: nutrición = supervivencia × well-being. Cuando se alcanza,
+    // la población deja de comprar (no se atraganta; el budget sobrante queda
+    // en wageFund para mañana).
+    const nutritionTarget = c.population * WAGES.nutritionPerCapita * WAGES.wellBeingFactor;
+    let nutritionAcquired = 0;
 
     for (const cand of candidates) {
-      if (budget <= 0) break;
+      if (budget <= 0 || nutritionAcquired >= nutritionTarget) break;
       const inv = m.inventory[cid][cand.pid] || 0;
       if (inv <= 0) continue;
-      const allocate = budget * (cand.pref / totalPref);
+      const allocate = budget * (cand.score / totalScore);
       const rates = effectiveTaxRates(state, cid);
       const unitTotal = cand.price * (1 + rates.sale);
       const wantUnits = allocate / unitTotal;
-      const buyUnits = Math.min(wantUnits, inv);
+      // Cap por nutrición remanente — no compra más de lo que falta para
+      // alcanzar el target nutricional.
+      const remainingNutrition = Math.max(0, nutritionTarget - nutritionAcquired);
+      const maxByNutrition = cand.nutrition > 0 ? remainingNutrition / cand.nutrition : wantUnits;
+      const buyUnits = Math.min(wantUnits, inv, maxByNutrition);
       if (buyUnits <= 0) continue;
       const r = executeTransaction(state, {
         sellerId: 'foreign',
@@ -59,9 +72,12 @@ export function populationSpend(state) {
       });
       if (!r.ok) continue;
       m.inventory[cid][cand.pid] -= buyUnits;
-      // Per-country daily consumption counter — alimenta el market snapshot CSV.
+      // Per-country daily consumption counter — feeding (1) market snapshot
+      // CSV y (2) el ring buffer consumptionHistory que alimenta el target
+      // dinámico en recomputeTargetStocks. Mismo counter para ambos consumers.
       if (!c.consumptionDay) c.consumptionDay = {};
       c.consumptionDay[cand.pid] = (c.consumptionDay[cand.pid] || 0) + buyUnits;
+      nutritionAcquired += buyUnits * cand.nutrition;
       budget -= (r.grossRevenue + r.taxPaid);
     }
 
