@@ -1,4 +1,4 @@
-// HeuristicBot — v1 con reglas simples para el primer barrido de exploits.
+// HeuristicBot — reglas simples para que el headless sim avance sin un humano.
 //
 // Filosofía: hacer lo "obvio" que un humano racional haría con el panel a la
 // vista. Si esto acumula plata infinita sin riesgo o reproduce un patrón
@@ -6,13 +6,10 @@
 // encontrar.
 //
 // Reglas (en orden de prioridad por día):
-//  1. Si tengo inventario de comida > 30 días de consumo del país en mi país →
-//     vender el excedente.
-//  2. Si tengo un loan disponible y cash < $5000 → pedir un working-capital.
-//  3. Si tengo cash > $X y un tile mío sin uso → plantar el crop de mejor
-//     priceMA30 entre los que el tile tolera (heurística: priceMA30/cycleDays).
-//  4. Si tengo un tile farm maduro → cosechar.
-//  5. Si tengo industria con inputs faltantes Y cash → comprarlos al mercado.
+//  1. Si tengo inventario de food > 30 días de consumo del país → vender el excedente.
+//  2. Si tengo un tile farm maduro → cosechar.
+//  3. Si tengo cash > MIN_CASH_TO_PLANT y un tile mío sin uso → plantar el food
+//     con mejor priceMA30 / cycleDays.
 
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { PRODUCIBLE_IDS, PRODUCIBLES, isFood } from '../data/producibles.js';
