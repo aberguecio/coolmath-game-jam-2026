@@ -1,5 +1,4 @@
 import { TIME, MAP, PLAYER_START, TILE, CITY, WAGES } from '../data/tunables.js';
-import { distanceToCity, cityRadius } from '../systems/City.js';
 import { createAIFarmersForCountry } from '../systems/AI.js';
 import { createCountriesState, initMarket } from '../systems/Market.js';
 import { initMarketSnapshot } from '../systems/MarketHistory.js';
@@ -81,8 +80,6 @@ function generateTilesFor(countryId, seed) {
         // revenue < cost × profitMargin. Used by AI to uproot chronically
         // unprofitable perennials even before they get harvested at a loss.
         skipStreak: 0,
-        // Housing
-        developmentDay: null,         // when developed-tile was completed
       });
     }
   }
@@ -300,17 +297,8 @@ export function isHaloTile(state, tile) {
   return halo.includes(tile.id);
 }
 
-export function tilePrice(tile, state = null) {
-  let base = TILE.baseRuralPrice + tile.quality * TILE.qualityPriceFactor;
-  const city = state ? cityOfTile(state, tile) : null;
-  if (city) {
-    const r = cityRadius(city);
-    const d = distanceToCity(tile, city);
-    if (d < r * 1.5) {
-      const proximity = Math.max(0, 1 - d / (r * 1.5));
-      base *= 1 + proximity * 1.5;
-    }
-  }
+export function tilePrice(tile, _state = null) {
+  const base = TILE.baseRuralPrice + tile.quality * TILE.qualityPriceFactor;
   return Math.round(base);
 }
 

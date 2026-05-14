@@ -27,7 +27,6 @@ import { tickAI, tickAIWeekly, tickAIMonthly } from '../systems/AI.js';
 import { tickStorageCost } from '../systems/Storage.js';
 import { tickLaborMarket } from '../systems/Labor.js';
 import { tickLoans } from '../systems/Bank.js';
-import { tickCityYearly } from '../systems/City.js';
 
 export function runSession({ driver, days = 365, state = null, onTick = null }) {
   if (!state) state = bootHeadlessState();
@@ -70,7 +69,6 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
       tickAIMonthly(state);
     }
     if (events.year) {
-      tickCityYearly(state);
       tickCountriesYearly(state);
     }
 

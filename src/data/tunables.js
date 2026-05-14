@@ -113,12 +113,7 @@ export const FARMING = {
 export const CITY = {
   x: 13,
   y: 7,
-  startPopulation: 1000,       // matches town population — the city IS the town's urban core
-  yearlyGrowth: 0.06,
-  baseRadius: 2.5,
-  radiusPerLogPop: 2.2,
-  loteBasePrice: 12000,
-  loteMaxMultiplier: 4,
+  startPopulation: 1000,       // fixed — population growth reintroduced in a future iteration
 };
 
 export const AI = {

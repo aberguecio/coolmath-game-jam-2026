@@ -19,7 +19,7 @@ import {
 import { tickFiscalCrisis } from '../systems/FiscalCrisis.js';
 import { seedIndustries } from '../systems/WorldSeed.js';
 import {
-  tickFarming, buyTile, plowTile, plantTile, harvestTile, loteTile,
+  tickFarming, buyTile, plowTile, plantTile, harvestTile,
   tileFinanceQuote, expectedYield, effectiveQualityFor,
   lockTypeForCategory, uprootTile,
 } from '../systems/Farming.js';
@@ -38,7 +38,6 @@ import {
   tickLoans, applyForLoan, eligibleProducts, quoteLoan, totalDebt, totalMonthlyPayment,
   loansOf,
 } from '../systems/Bank.js';
-import { tickCityYearly, cityRadius, distanceToCity, isInsideHalo, lotePrice } from '../systems/City.js';
 import { tickAI, tickAIWeekly, tickAIMonthly } from '../systems/AI.js';
 import { tickEvents } from '../systems/Events.js';
 import { LOAN_PRODUCTS, LOAN_PRODUCT_LIST, resolveMaxPrincipal } from '../data/loanProducts.js';
@@ -212,15 +211,10 @@ export class Game extends Phaser.Scene {
 
   refreshCity() {
     const c = this.currentCity();
-    const r = cityRadius(c);
     const cx = MAP_OFFSET_X + c.x * MAP.tilePx + MAP.tilePx / 2;
     const cy = MAP_OFFSET_Y + c.y * MAP.tilePx + MAP.tilePx / 2;
 
     this.cityGfx.clear();
-    this.cityGfx.fillStyle(0x66ccff, 0.10);
-    this.cityGfx.fillCircle(cx, cy, r * MAP.tilePx);
-    this.cityGfx.lineStyle(1, 0x66ccff, 0.45);
-    this.cityGfx.strokeCircle(cx, cy, r * MAP.tilePx);
     this.cityGfx.fillStyle(0x9aa4ad, 1);
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
@@ -572,7 +566,6 @@ export class Game extends Phaser.Scene {
         `Tile (${tile.x},${tile.y})`,
         `Owner: ${this.ownerLabel(tile)}`,
         `Quality: ${(tile.quality * 100).toFixed(0)}%`,
-        `City dist: ${distanceToCity(tile, s.city).toFixed(1)}`,
         `State: ${stateText}`,
       ];
       if (tile.crop) {
@@ -608,7 +601,6 @@ export class Game extends Phaser.Scene {
         lines.push(`🔒 Locked to 🌾 ${tile.lockType}`);
       }
       if (tile.owner === 'wild') lines.push(`Price: $${tilePrice(tile, s)}`);
-      if (isInsideHalo(tile, s.city)) lines.push(`City halo · lot: $${lotePrice(tile, s.city)}`);
       this.panelText.setText(lines.join('\n'));
 
       // Use the actual rendered height of the wrapped text instead of guessing
@@ -761,12 +753,6 @@ export class Game extends Phaser.Scene {
           );
         }
 
-        if (isInsideHalo(tile, s.city) && tile.state !== 'planted' && tile.state !== 'mature' && tile.state !== 'lot') {
-          const price = lotePrice(tile, s.city);
-          y = this.addActionButton(`Develop & sell`, y, price > 0, () => {
-            const r = loteTile(s, tile); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll();
-          }, `+$${price}`);
-        }
       }
     }
 
@@ -1639,7 +1625,6 @@ export class Game extends Phaser.Scene {
       tickAIMonthly(this.state);        // 11: AI close, reopen, sell inventory
     }
     if (events.year) {
-      tickCityYearly(this.state);
       tickCountriesYearly(this.state);
     }
     if (events.day) {

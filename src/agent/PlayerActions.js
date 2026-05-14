@@ -18,7 +18,7 @@
 
 import { tileById } from '../state/GameState.js';
 import {
-  buyTile, plowTile, plantTile, harvestTile, uprootTile, toggleAutoReplant, loteTile,
+  buyTile, plowTile, plantTile, harvestTile, uprootTile, toggleAutoReplant,
 } from '../systems/Farming.js';
 import { applyForLoan } from '../systems/Bank.js';
 import { sellFromInventory, buyFromGlobal } from '../systems/Market.js';
@@ -62,12 +62,6 @@ export function actToggleAutoReplant(state, { tileId, countryId }) {
   return toggleAutoReplant(state, tile);
 }
 
-export function actLoteTile(state, { tileId, countryId }) {
-  const tile = tileById(state, countryId, tileId);
-  if (!tile) return { ok: false, reason: 'tile not found' };
-  return loteTile(state, tile);
-}
-
 // =============================================================================
 // Market trading (player wallet only — bots use this same path)
 // =============================================================================
@@ -106,7 +100,6 @@ export const ACTION_REGISTRY = {
   harvestTile: actHarvestTile,
   uprootTile: actUprootTile,
   toggleAutoReplant: actToggleAutoReplant,
-  loteTile: actLoteTile,
   sellInventory: actSellInventory,
   buyFromMarket: actBuyFromMarket,
   takeLoan: actTakeLoan,

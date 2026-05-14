@@ -46,14 +46,6 @@ export const INFO_TEXTS = {
     title: 'Industry Status',
     body: 'building — countdown to operational · operational — producing if inputs available · idle — waiting for inputs but still paying salary · closed — not running, no salary, can be reopened by paying buildCost again.',
   },
-  'halo': {
-    title: 'Urban Halo',
-    body: 'The 8 tiles immediately adjacent to any city tile. Industries can ONLY be built on halo tiles. Developing residential lots also requires halo. As the city annexes new tiles (via housing-market sales), the halo extends further out.',
-  },
-  'developed-tile': {
-    title: 'Developed Tile',
-    body: 'A halo tile you developed (paid setup, waited 180 days). Can be listed for sale to the city housing market. Sale price tracks population vs available developed tiles — high pop + low supply = expensive. When sold, the city annexes the tile and the halo extends.',
-  },
   'preferences': {
     title: 'Food Preferences',
     body: 'How much each country wants each food. Population buys in preference order. If a preferred food is unaffordable, demand cascades to cheaper alternatives until budget runs out.',

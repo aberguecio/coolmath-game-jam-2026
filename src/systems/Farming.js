@@ -3,7 +3,6 @@ import { LAND_ACTIONS, FISCAL_CRISIS, FARMING } from '../data/tunables.js';
 import { harvestToInventory, sellFromInventory } from './Market.js';
 import { applyForLoan, quoteLoan, walletFor } from './Bank.js';
 import { tilePrice, pushLog, pushFx } from '../state/GameState.js';
-import { lotePrice, isInsideHalo } from './City.js';
 import { growthMultiplier } from './Events.js';
 import {
   effectiveHarvestCost, effectivePlowCost,
@@ -421,24 +420,3 @@ export function harvestTile(state, tile) {
   return { ok: true, units, revenue: 0, kept: true };
 }
 
-export function loteTile(state, tile) {
-  if (tile.owner !== 'player') return { ok: false, reason: 'Not yours' };
-  if (tile.state === 'planted' || tile.state === 'mature') {
-    return { ok: false, reason: 'Active crop on tile' };
-  }
-  const city = state.cities?.[tile.countryId] ?? state.city;
-  if (!isInsideHalo(tile, city)) return { ok: false, reason: 'Too far from city' };
-  const price = lotePrice(tile, city);
-  if (price <= 0) return { ok: false, reason: 'No demand' };
-  state.player.cash += price;
-  tile.owner = 'developer';
-  tile.state = 'lot';
-  tile.crop = null;
-  pushLog(state, `Developed (${tile.x},${tile.y}) → $${price}`);
-  pushFx(state, { type: 'sfx', kind: 'chime' });
-  pushFx(state, {
-    type: 'coins', from: { tileId: tile.id }, to: 'cash',
-    count: 6, value: price, color: 0xffd166,
-  });
-  return { ok: true, revenue: price };
-}
