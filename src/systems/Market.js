@@ -5,7 +5,7 @@
 // runs through executeTransaction to guarantee taxes/wages/ledger consistency.
 
 import { MARKET, ECONOMY_DEFAULTS, WAGES } from '../data/tunables.js';
-import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
+import { PRODUCIBLES, PRODUCIBLE_IDS, isFood } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { tickPriceIndex } from './PriceIndex.js';
 import { executeTransaction, walletOf, walletCountryFor } from './Transactions.js';
@@ -56,19 +56,17 @@ export function createCountriesState() {
       // === Inflation tracking ====================================================
       priceIndex: 1.0,                  // EMA of basket vs basePrice; starts at 1
       priceIndexHistory: [1.0],         // 360-day rolling
-      // === Saturation (per producible) ===========================================
-      saturatedDays: {},                // pid → consecutive days a sale failed
     };
     for (const pid of PRODUCIBLE_IDS) {
       runtime[id].tradeBalanceEMA[pid] = 0;
       runtime[id].decisionLog[pid] = [1.0];
-      runtime[id].saturatedDays[pid] = 0;
-      // Seed consumptionHistory con 90 días de baseline. Esto da un punto de
-      // partida coherente al day 0 (target ≈ baseline × 30) y se reemplaza
-      // gradualmente con flujo real conforme la población compra a lo largo
-      // de los siguientes 3 meses. La población siempre es local → seed va al
-      // componente local; el componente export arranca en cero.
-      const seed = c.consumption[pid] || 0;
+      // Seed consumptionHistory SÓLO para items que la población realmente
+      // compra (food). Minerales y procesados arrancan en 0 — su demanda real
+      // viene cuando una industria los consume vía buyFromGlobal y eso
+      // dispara _recordConsumption orgánicamente. Sin esto, los minerales
+      // tenían un fantasma de demanda baseline que les hacía subir el precio
+      // aunque nadie los compre nunca.
+      const seed = isFood(pid) ? (c.consumption[pid] || 0) : 0;
       runtime[id].consumptionHistory[pid] = new Array(90).fill(seed);
       runtime[id].consumptionLocalHistory[pid] = new Array(90).fill(seed);
       runtime[id].consumptionExportHistory[pid] = new Array(90).fill(0);
@@ -117,9 +115,8 @@ export function recordConsumption(country, producibleId, units, isExport = false
 // Per-country market initialization
 // =============================================================================
 // Target dinámico: 30 días del promedio diario observado en los últimos 90.
-// Si nadie compra steel en 90 días → avgDaily=0 → target=20 (floor) → cualquier
-// stock arriba de 20 satura → gap negativo → precio cae. Self-referential:
-// el target sigue al flujo real, no a un baseline impuesto.
+// Sin floor — si nadie compró steel en 90 días, target=0 y el item se vuelve
+// precio-libre (la fórmula del gap lo maneja explícitamente).
 export function recomputeTargetStocks(state) {
   const m = state.market;
   for (const cid of COUNTRY_IDS) {
@@ -133,9 +130,7 @@ export function recomputeTargetStocks(state) {
         for (const v of hist) sum += v;
         avgDaily = sum / hist.length;
       }
-      // Piso de 20: evita división por cero en la gap formula y mantiene un
-      // mínimo de liquidez nominal en góndola para items dormidos.
-      m.targetStock[cid][pid] = Math.max(20, Math.round(avgDaily * MARKET.stockBufferDays));
+      m.targetStock[cid][pid] = Math.round(avgDaily * MARKET.stockBufferDays);
     }
   }
 }
@@ -225,6 +220,18 @@ export function tickMarket(state) {
   }
 
   const m = state.market;
+  // Capturar supplyToday y consumptionDay del día anterior ANTES de que la
+  // rotación los borre. Estos valores se pasan a recordMarketSnapshot al final
+  // del tick para que la serie snapshot.supplyDay / snapshot.consumptionDay
+  // tenga los flujos del día anterior (no ceros). Sin esto, los charts de
+  // Flows mostrarían siempre 0.
+  const prevSupplyToday = {};
+  const prevConsumptionDay = {};
+  for (const cid of COUNTRY_IDS) {
+    const c = state.countries[cid];
+    prevSupplyToday[cid] = { ...(c.supplyToday || {}) };
+    prevConsumptionDay[cid] = { ...(c.consumptionDay || {}) };
+  }
   // Rotar los 6 counters _Today → _History (90 días) y resetear. Tabla
   // declarativa: agregar un par nuevo es una línea más. Mantiene los 3 pares
   // (total + 2 componentes) sincronizados sin escribir el código 6 veces.
@@ -264,35 +271,20 @@ export function tickMarket(state) {
   // when an exporter cargo settles in its destination, not from a magic loop
   // here.
 
-  // Per-country price update via stock gap. Also applies saturation pressure: when
-  // a country's market has been unable to absorb production, local price drifts down
-  // gradually (proportional to consecutive saturated days, capped).
+  // Per-country price update via stock gap.
+  //   target > 0  → gap = (target − inv) / target en [−∞, 1]
+  //   target = 0  → gap = −1 siempre (no hay consumidor observado → el ítem
+  //                 no tiene demanda real, el precio decae a tasa máxima
+  //                 hasta absoluteMinPrice). Aplica exista o no exista stock:
+  //                 sin compradores el precio carece de significado económico
+  //                 y debe colapsar al piso del modelo.
   for (const cid of COUNTRY_IDS) {
-    const c = state.countries[cid];
     for (const pid of PRODUCIBLE_IDS) {
-      const target = m.targetStock[cid][pid] || 50;
+      const target = m.targetStock[cid][pid] || 0;
       const inv = m.inventory[cid][pid] || 0;
-      const supToday = c.supplyToday[pid] || 0;
-      // Item extinto: nadie produjo hoy, la góndola está vacía. La fórmula
-      // gap-driven leería gap=1 → price sube indefinidamente sin que exista
-      // ni un cajón ni una transacción para anclar el valor. Freezar el
-      // precio hasta que alguien vuelva a producir o aparezca stock — eso
-      // es el ancla natural del modelo. No es un cap (no acota el techo
-      // alcanzable cuando SÍ hay actividad), es bien-definirlo cuando no.
-      if (inv === 0 && supToday === 0) {
-        m.history[cid][pid].push(m.prices[cid][pid]);
-        continue;
-      }
-      const gap = (target - inv) / target;
+      const gap = target > 0 ? (target - inv) / target : -1;
       const noise = (Math.random() * 2 - 1) * MARKET.noiseAmp;
-      let newPrice = m.prices[cid][pid] * (1 + gap * MARKET.responsiveness + noise);
-
-      const sat = c?.saturatedDays?.[pid] || 0;
-      if (sat > 0) {
-        const cut = Math.min(0.04, 0.003 * sat);
-        newPrice *= (1 - cut);
-      }
-
+      const newPrice = m.prices[cid][pid] * (1 + gap * MARKET.responsiveness + noise);
       m.prices[cid][pid] = Math.max(MARKET.absoluteMinPrice, newPrice);
       m.history[cid][pid].push(m.prices[cid][pid]);
       // History is unbounded — push is O(1) and memory cost is small (one
@@ -303,10 +295,11 @@ export function tickMarket(state) {
   // Inflation index update (after prices settle for the day).
   tickPriceIndex(state);
 
-  // Record the day's market snapshot for the debug CSV export. Runs LAST so
-  // every field (price, marketStock, supplyToday, consumptionDay, priceIndex,
-  // wageRate) is fully settled. After this, supplyToday is safe to reset.
-  recordMarketSnapshot(state);
+  // Record the day's market snapshot for the debug CSV export y los stock
+  // charts. price, marketStock y priceIndex se leen del state actual (ya
+  // settled). supplyDay y consumptionDay se pasan como override desde los
+  // counters que capturamos antes de la rotación — sin eso quedarían en 0.
+  recordMarketSnapshot(state, prevSupplyToday, prevConsumptionDay);
 
   // Reset supplyToday for the next day's external producers to push into.
   for (const cid of COUNTRY_IDS) state.countries[cid].supplyToday = {};

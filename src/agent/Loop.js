@@ -25,7 +25,7 @@ import {
   tickIndustries, tickIndustrySalaries, tickFiscalCrisis,
 } from '../systems/Industries.js';
 import { tickMarket, populationSpend, tickCountriesYearly } from '../systems/Market.js';
-import { tickAI, tickAIMonthly } from '../systems/AI.js';
+import { tickAI, tickAIWeekly, tickAIMonthly } from '../systems/AI.js';
 import { tickExporters } from '../systems/Exporters.js';
 import { aiExporterTryShipment } from '../systems/ExporterAI.js';
 import { tickMiningOps } from '../systems/Mining.js';
@@ -72,6 +72,7 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
           aiExporterTryShipment(state, exp);
         }
       }
+      if (state.time.totalDays % 7 === 0) tickAIWeekly(state);
     }
     if (events.month) {
       tickIndustrySalaries(state);

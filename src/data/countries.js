@@ -20,7 +20,7 @@ export const PLAYER_COUNTRY_ID = 'home';
 // sizing-parameter para targetStock (góndola buffer) + peso del basket de
 // priceIndex + escalado por crecimiento poblacional, NO drena la góndola.
 const TOWN_BASELINE = {
-  population: 2000,
+  population: 1000,
   populationGrowth: 0.010,
   supplyResponsiveness: 2.0,
   taxRatesId: 'homeRates',

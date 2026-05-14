@@ -30,7 +30,7 @@ export const ECONOMY_DEFAULTS = {
 // Stock/flow simulator parameters.
 export const MARKET = {
   stockBufferDays: 30,        // target inventory = expected daily demand × this
-  responsiveness: 0.04,       // how aggressively prices adjust to stock gap each day
+  responsiveness: 0.01,       // max daily price change is ±1% (gap × responsiveness, gap ∈ [−1, 1])
   noiseAmp: 0.005,            // tiny daily noise so prices don't freeze flat
   // Elasticity bounds for supply response (production = base × clamped factor).
   // Stops a tiny country from producing 0 OR exploding to infinity in extreme conditions.
@@ -132,7 +132,7 @@ export const FARMING = {
 export const CITY = {
   x: 13,
   y: 7,
-  startPopulation: 2000,       // matches town population — the city IS the town's urban core
+  startPopulation: 1000,       // matches town population — the city IS the town's urban core
   yearlyGrowth: 0.06,
   baseRadius: 2.5,
   radiusPerLogPop: 2.2,
@@ -193,7 +193,7 @@ export const WAGES = {
   // contribute via their `nutritionUnits` field. populationSpend stops buying
   // once acquired nutrition reaches population × NUTRITION_PER_CAPITA × WELL_BEING_FACTOR.
   // If budget can't cover this, hunger is implicit (less consumed → target drops).
-  nutritionPerCapita: 0.3,
+  nutritionPerCapita: 0.1,
   wellBeingFactor: 1.2,           // +20% over survival when they can afford it
 };
 

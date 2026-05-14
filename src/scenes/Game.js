@@ -49,7 +49,7 @@ import {
   loansOf,
 } from '../systems/Bank.js';
 import { tickCityYearly, cityRadius, distanceToCity, isInsideHalo, lotePrice } from '../systems/City.js';
-import { tickAI, tickAIMonthly } from '../systems/AI.js';
+import { tickAI, tickAIWeekly, tickAIMonthly } from '../systems/AI.js';
 import { tickEvents } from '../systems/Events.js';
 import { LOAN_PRODUCTS, LOAN_PRODUCT_LIST, resolveMaxPrincipal } from '../data/loanProducts.js';
 import { startMusic, toggleMute, isMusicMuted } from '../systems/Music.js';
@@ -132,6 +132,7 @@ export class Game extends Phaser.Scene {
     this.buildOfferModal();
     this.buildMarketModal();
     this.buildPriceChartModal();
+    this.buildStockChartModal();
     this.buildEventsModal();
     this.buildCompaniesModal();
     this.buildExportersModal();
@@ -158,6 +159,7 @@ export class Game extends Phaser.Scene {
     this.input.keyboard.on('keydown-ESC', () => {
       if (this.state.ui.offerOpen) { this.closeOfferModal(); return; }
       if (this.state.ui.priceChartOpen) { this.togglePriceChart(false); return; }
+      if (this.state.ui.stockChartOpen) { this.toggleStockChart(false); return; }
       if (this.state.ui.marketOpen) { this.toggleMarket(false); return; }
       if (this.state.ui.eventsOpen) { this.toggleEvents(false); return; }
       if (this.state.ui.companiesOpen) { this.toggleCompanies(false); return; }
@@ -1414,7 +1416,7 @@ export class Game extends Phaser.Scene {
       '• Exporters unloading cargo here\n\n' +
       'Money flows out to:\n' +
       '• Player / AI / exporters selling into market\n\n' +
-      'If it dries up: sales into this pool fail (saturatedDays rises → prices drift down). Exporters either fire-sale or dump cargo for free when the pool hits 0.');
+      'If it dries up: sales into this pool fail. Exporters either fire-sale or dump cargo for free when the pool hits 0.');
 
     rowWithInfo(colB, infoTop + lineH * 4,
       `priceIndex: ${pi} (${piSign}${piPct}%)`, Math.abs(piPct) > 30 ? '#ff8c8c' : '#cdd6df',
@@ -1863,6 +1865,7 @@ export class Game extends Phaser.Scene {
     if (this.state.ui.offerOpen) this.refreshOfferModal();
     if (this.state.ui.marketOpen) this.refreshMarketModal();
     if (this.state.ui.priceChartOpen) this.refreshPriceChartModal();
+    if (this.state.ui.stockChartOpen) this.refreshStockChartModal();
     if (this.state.ui.eventsOpen) this.refreshEventsModal();
     if (this.state.ui.companiesOpen) this.refreshCompaniesModal();
     if (this.state.ui.exportersOpen) this.refreshExportersModal();
@@ -1892,6 +1895,8 @@ export class Game extends Phaser.Scene {
           aiExporterTryShipment(this.state, exp);
         }
       }
+      // Weekly cadence: AI vuelca inventario al market 1×/semana (antes 1×/mes).
+      if (this.state.time.totalDays % 7 === 0) tickAIWeekly(this.state);
     }
     if (events.month) {
       tickIndustrySalaries(this.state); // 8: industries pay salaries
@@ -2122,6 +2127,26 @@ export class Game extends Phaser.Scene {
       sparkHit.on('pointerdown', () => this.openPriceChartFor(def.id, cid));
       this.marketGroup.add(sparkHit);
       this.marketDynamicNodes.push(sparkHit);
+
+      // 📦 stock chart icon — small overlay at the top-right corner of the
+      // sparkline. Sits above sparkHit so its click opens the stock view
+      // without triggering the price chart.
+      const stockIconW = 20, stockIconH = 16;
+      const stockIconX = sparkX + sparkW - stockIconW - 2;
+      const stockIconY = sparkY + 2;
+      const stockIconBg = this.add.rectangle(stockIconX, stockIconY, stockIconW, stockIconH, 0x1a2530, 0.85)
+        .setOrigin(0, 0).setDepth(59).setInteractive({ useHandCursor: true });
+      const stockIconTxt = this.add.text(stockIconX + stockIconW / 2, stockIconY + stockIconH / 2, '📦', {
+        fontFamily: 'monospace', fontSize: '11px',
+      }).setOrigin(0.5).setDepth(60);
+      stockIconBg.on('pointerover', () => stockIconBg.setFillStyle(0x6ee7b7, 0.4));
+      stockIconBg.on('pointerout', () => stockIconBg.setFillStyle(0x1a2530, 0.85));
+      stockIconBg.on('pointerdown', (pointer, lx, ly, evt) => {
+        if (evt) evt.stopPropagation();
+        this.openStockChartFor(def.id, cid);
+      });
+      this.marketGroup.add(stockIconBg); this.marketGroup.add(stockIconTxt);
+      this.marketDynamicNodes.push(stockIconBg, stockIconTxt);
 
       const stock = Math.round(s.market.inventory?.[cid]?.[def.id] || 0);
       const offMkt = this.offMarketInventoryFor(s, cid, def.id);
@@ -2520,6 +2545,263 @@ export class Game extends Phaser.Scene {
       const color = which === 'min' ? 0xff7a7a : 0x6ee79a;
       this.priceChartGfx.fillStyle(color, 1);
       this.priceChartGfx.fillCircle(px, py, 3);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // STOCK CHART MODAL — clon estructural del PRICE CHART pero leyendo
+  // state.market.snapshot. Dos modos vía toggle: "Stocks" (marketStock vs
+  // offMarketStock) y "Flows" (supplyDay vs consumptionDay). Cada par tiene
+  // escalas naturalmente compatibles entre sí.
+  // -----------------------------------------------------------------------
+  buildStockChartModal() {
+    const frame = this.makeModalFrame({
+      w: 720, h: 500, title: '📦  STOCK CHART', color: 0x6ee7b7,
+      onClose: () => this.toggleStockChart(false),
+      depth: 62,                                  // above Market modal
+    });
+    this.stockChartFrame = frame;
+    this.stockChartGfx = this.add.graphics().setDepth(63);
+    frame.group.add(this.stockChartGfx);
+    this.stockChartDynamic = [];
+  }
+
+  openStockChartFor(pid, cid) {
+    const s = this.state;
+    s.ui.stockChartPid = pid;
+    s.ui.stockChartCid = cid;
+    if (!s.ui.stockChartDays) s.ui.stockChartDays = 90;
+    if (!s.ui.stockChartMode) s.ui.stockChartMode = 'stocks';
+    this.toggleStockChart(true);
+  }
+
+  toggleStockChart(open) {
+    const s = this.state;
+    if (open && !s.ui.stockChartOpen) this.enterModal();
+    else if (!open && s.ui.stockChartOpen) this.exitModal();
+    s.ui.stockChartOpen = open;
+    this.stockChartFrame.group.setVisible(open);
+    if (open) this.refreshStockChartModal();
+    this.refreshTopBar();
+  }
+
+  refreshStockChartModal() {
+    const s = this.state;
+    const pid = s.ui.stockChartPid;
+    const cid = s.ui.stockChartCid;
+    if (!pid || !cid) return;
+    const def = PRODUCIBLES[pid];
+    if (!def) return;
+    const snapshot = s.market.snapshot?.[cid]?.[pid] || [];
+
+    for (const n of this.stockChartDynamic) n.destroy();
+    this.stockChartDynamic = [];
+    this.stockChartGfx.clear();
+
+    const { x, y, w, h, contentTop, contentBottom } = this.stockChartFrame;
+
+    this.stockChartFrame.group.list[2].setText(
+      `📦  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`,
+    );
+
+    const mode = s.ui.stockChartMode || 'stocks';
+    const seriesByMode = {
+      stocks: [
+        { key: 'marketStock',    label: 'Market',     color: 0x6ee7b7 },
+        { key: 'offMarketStock', label: 'Off-market', color: 0x7a8694 },
+      ],
+      flows: [
+        { key: 'supplyDay',      label: 'Supply',      color: 0x60b3ff },
+        { key: 'consumptionDay', label: 'Consumption', color: 0xff6b6b },
+      ],
+    };
+    const series = seriesByMode[mode];
+
+    // ---- Toggle Stocks / Flows ----
+    const toggleY = contentTop;
+    const toggleOpts = [
+      { id: 'stocks', label: 'Stocks' },
+      { id: 'flows',  label: 'Flows' },
+    ];
+    let tgX = x + 18;
+    for (const opt of toggleOpts) {
+      const active = mode === opt.id;
+      const bg = this.add.rectangle(tgX, toggleY, 70, 22,
+        active ? 0x6ee7b7 : 0x243345).setOrigin(0, 0).setDepth(63)
+        .setInteractive({ useHandCursor: true });
+      const txt = this.add.text(tgX + 35, toggleY + 11, opt.label, {
+        fontFamily: 'monospace', fontSize: '11px',
+        color: active ? '#0f1923' : '#cdd6df',
+        fontStyle: active ? 'bold' : 'normal',
+      }).setOrigin(0.5).setDepth(64);
+      bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
+      bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
+      bg.on('pointerdown', () => {
+        s.ui.stockChartMode = opt.id;
+        this.refreshStockChartModal();
+      });
+      this.stockChartFrame.group.add(bg); this.stockChartFrame.group.add(txt);
+      this.stockChartDynamic.push(bg, txt);
+      tgX += 76;
+    }
+
+    // ---- Date filter pills (right side of toggle row) ----
+    const days = s.ui.stockChartDays || 90;
+    const ranges = [
+      { label: '1M',  days: 30 },
+      { label: '3M',  days: 90 },
+      { label: '6M',  days: 180 },
+      { label: '1Y',  days: 365 },
+      { label: '3Y',  days: 365 * 3 },
+      { label: '5Y',  days: 365 * 5 },
+      { label: 'All', days: Infinity },
+    ];
+    let pillX = tgX + 16;
+    for (const r of ranges) {
+      const active = days === r.days;
+      const bg = this.add.rectangle(pillX, toggleY, 48, 22,
+        active ? 0xffb347 : 0x243345).setOrigin(0, 0).setDepth(63)
+        .setInteractive({ useHandCursor: true });
+      const txt = this.add.text(pillX + 24, toggleY + 11, r.label, {
+        fontFamily: 'monospace', fontSize: '10px',
+        color: active ? '#0f1923' : '#cdd6df',
+        fontStyle: active ? 'bold' : 'normal',
+      }).setOrigin(0.5).setDepth(64);
+      bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
+      bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
+      bg.on('pointerdown', () => {
+        s.ui.stockChartDays = r.days;
+        this.refreshStockChartModal();
+      });
+      this.stockChartFrame.group.add(bg); this.stockChartFrame.group.add(txt);
+      this.stockChartDynamic.push(bg, txt);
+      pillX += 52;
+    }
+
+    // ---- Window of samples ----
+    const samples = days === Infinity ? snapshot.slice() : snapshot.slice(-days);
+    if (samples.length < 2) {
+      const empty = this.add.text(x + w / 2, (contentTop + contentBottom) / 2,
+        'Not enough history yet — let some days pass.', {
+        fontFamily: 'monospace', fontSize: '12px', color: '#7a8694',
+      }).setOrigin(0.5).setDepth(63);
+      this.stockChartFrame.group.add(empty); this.stockChartDynamic.push(empty);
+      return;
+    }
+
+    // ---- Stats row (depende del mode) ----
+    const lastRec = samples[samples.length - 1];
+    const statsY = toggleY + 30;
+    let statsLine;
+    if (mode === 'stocks') {
+      const mk = lastRec.marketStock || 0;
+      const off = lastRec.offMarketStock || 0;
+      const tot = mk + off;
+      const pct = tot > 0 ? Math.round((mk / tot) * 100) : 0;
+      statsLine = `Market ${mk}u   ·   Off-market ${off}u   ·   In-góndola ratio ${pct}%   ·   ${samples.length}d`;
+    } else {
+      const last30 = samples.slice(-30);
+      const sumSup = last30.reduce((s, r) => s + (r.supplyDay || 0), 0);
+      const sumCons = last30.reduce((s, r) => s + (r.consumptionDay || 0), 0);
+      const net = sumSup - sumCons;
+      const netStr = `${net >= 0 ? '+' : ''}${net}u`;
+      statsLine = `30d supply ${sumSup}u   ·   30d consumption ${sumCons}u   ·   Net ${netStr}   ·   ${samples.length}d`;
+    }
+    const statsTxt = this.add.text(x + 18, statsY, statsLine, {
+      fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
+    }).setDepth(63);
+    this.stockChartFrame.group.add(statsTxt); this.stockChartDynamic.push(statsTxt);
+
+    // ---- Plot area ----
+    const plotLeft = x + 60;
+    const plotRight = x + w - 24;
+    const plotTop = statsY + 28;
+    const plotBottom = contentBottom - 24;
+    const plotW = plotRight - plotLeft;
+    const plotH = plotBottom - plotTop;
+
+    // Calcular min/max sobre AMBAS series del modo activo (escala compartida)
+    let minV = Infinity, maxV = -Infinity;
+    for (const rec of samples) {
+      for (const ser of series) {
+        const v = rec[ser.key] || 0;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+      }
+    }
+    if (!isFinite(minV)) { minV = 0; maxV = 1; }
+    if (maxV === minV) maxV = minV + 1;
+
+    // Y axis grid + labels
+    const range = (maxV - minV) || 1;
+    const yPad = range * 0.08;
+    const yMin = Math.max(0, minV - yPad);
+    const yMax = maxV + yPad;
+    const yRange = (yMax - yMin) || 1;
+    for (let g = 0; g <= 4; g++) {
+      const yVal = yMin + (yRange * g) / 4;
+      const py = plotBottom - ((yVal - yMin) / yRange) * plotH;
+      this.stockChartGfx.lineStyle(1, 0x3a4d63, 0.5);
+      this.stockChartGfx.lineBetween(plotLeft, py, plotRight, py);
+      const lab = this.add.text(plotLeft - 6, py, `${Math.round(yVal)}u`, {
+        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
+      }).setOrigin(1, 0.5).setDepth(63);
+      this.stockChartFrame.group.add(lab); this.stockChartDynamic.push(lab);
+    }
+
+    // X axis labels
+    const startDay = samples[0].day;
+    const endDay = samples[samples.length - 1].day;
+    const xStartLab = this.add.text(plotLeft, plotBottom + 6, `day ${startDay}`, {
+      fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
+    }).setDepth(63);
+    const xEndLab = this.add.text(plotRight, plotBottom + 6, `day ${endDay}`, {
+      fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
+    }).setOrigin(1, 0).setDepth(63);
+    this.stockChartFrame.group.add(xStartLab); this.stockChartFrame.group.add(xEndLab);
+    this.stockChartDynamic.push(xStartLab, xEndLab);
+
+    // Líneas de las 2 series + legend
+    let legendX = plotRight - 10;
+    for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
+      const ser = series[sIdx];
+      this.stockChartGfx.lineStyle(2, ser.color, 1);
+      this.stockChartGfx.beginPath();
+      for (let i = 0; i < samples.length; i++) {
+        const px = plotLeft + (i / (samples.length - 1)) * plotW;
+        const py = plotBottom - (((samples[i][ser.key] || 0) - yMin) / yRange) * plotH;
+        if (i === 0) this.stockChartGfx.moveTo(px, py);
+        else this.stockChartGfx.lineTo(px, py);
+      }
+      this.stockChartGfx.strokePath();
+      // Legend entry (right-aligned, top)
+      const labW = ser.label.length * 7 + 16;
+      const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color)
+        .setOrigin(1, 0).setDepth(63);
+      const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
+        fontFamily: 'monospace', fontSize: '10px',
+        color: '#' + ser.color.toString(16).padStart(6, '0'),
+      }).setOrigin(0, 0).setDepth(63);
+      this.stockChartFrame.group.add(sq); this.stockChartFrame.group.add(lab);
+      this.stockChartDynamic.push(sq, lab);
+      legendX -= (labW + 14);
+    }
+
+    // Min/max markers — solo en mode 'stocks' (flows son ruidosos)
+    if (mode === 'stocks') {
+      for (const ser of series) {
+        let minI = 0, maxI = 0;
+        for (let i = 1; i < samples.length; i++) {
+          if ((samples[i][ser.key] || 0) < (samples[minI][ser.key] || 0)) minI = i;
+          if ((samples[i][ser.key] || 0) > (samples[maxI][ser.key] || 0)) maxI = i;
+        }
+        for (const [idx, color] of [[minI, 0xff7a7a], [maxI, 0x6ee79a]]) {
+          const px = plotLeft + (idx / (samples.length - 1)) * plotW;
+          const py = plotBottom - (((samples[idx][ser.key] || 0) - yMin) / yRange) * plotH;
+          this.stockChartGfx.fillStyle(color, 1);
+          this.stockChartGfx.fillCircle(px, py, 3);
+        }
+      }
     }
   }
 

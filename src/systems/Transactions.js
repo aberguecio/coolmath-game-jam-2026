@@ -103,17 +103,11 @@ export function executeTransaction(state, params) {
     // marketPool of the seller-country must cover everything that will leave
     // it: seller payment, wages → wageFund, and tax → treasury.
     if (sellerCountryRuntime.marketPool < (netToSeller + wagePaid + taxPaid)) {
-      sellerCountryRuntime.saturatedDays[productId] =
-        (sellerCountryRuntime.saturatedDays[productId] || 0) + 1;
-      return { ok: false, reason: 'marketPool dry (saturated)' };
+      return { ok: false, reason: 'marketPool dry' };
     }
   }
 
   // === Mutate ===
-  if (sellerCountryRuntime?.saturatedDays?.[productId]) {
-    sellerCountryRuntime.saturatedDays[productId] = 0;
-  }
-
   // 1. Pull cash from buyer side.
   if (isRealBuyer) {
     buyerWallet.cash -= totalCost;

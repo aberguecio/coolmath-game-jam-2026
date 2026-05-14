@@ -27,13 +27,18 @@ export function initMarketSnapshot(state) {
   }
 }
 
-export function recordMarketSnapshot(state) {
+// Acepta overrides opcionales para supply/consumption — tickMarket captura
+// estos counters ANTES de rotarlos y los pasa acá. Sin eso, supplyDay y
+// consumptionDay quedarían en 0 (la rotación los borra antes del snapshot).
+export function recordMarketSnapshot(state, supplyOverride = null, consumptionOverride = null) {
   if (!state.market.snapshot) initMarketSnapshot(state);
   const day = state.time.totalDays;
   for (const cid of COUNTRY_IDS) {
     const c = state.countries[cid];
     if (!c) continue;
     const series = state.market.snapshot[cid];
+    const supplySrc = supplyOverride?.[cid] ?? c.supplyToday;
+    const consSrc = consumptionOverride?.[cid] ?? c.consumptionDay;
     for (const pid of PRODUCIBLE_IDS) {
       const price = state.market.prices?.[cid]?.[pid] ?? 0;
       series[pid].push({
@@ -42,8 +47,8 @@ export function recordMarketSnapshot(state) {
         priceMA30: Math.round(priceMA(state, pid, cid, 30) * 100) / 100,
         marketStock: Math.round(state.market.inventory?.[cid]?.[pid] ?? 0),
         offMarketStock: Math.round(offMarketInventoryFor(state, cid, pid)),
-        supplyDay: Math.round(c.supplyToday?.[pid] ?? 0),
-        consumptionDay: Math.round(c.consumptionDay?.[pid] ?? 0),
+        supplyDay: Math.round(supplySrc?.[pid] ?? 0),
+        consumptionDay: Math.round(consSrc?.[pid] ?? 0),
         priceIndex: Math.round((c.priceIndex ?? 1) * 1000) / 1000,
         wageRate: Math.round(c.wageRate ?? 0),
       });

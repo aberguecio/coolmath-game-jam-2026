@@ -239,13 +239,20 @@ export function tickAI(state) {
   }
 }
 
-// Monthly hook: AI prunes unprofitable industries, reopens recovered ones,
-// tops up inputs, and sells outputs (crops/minerals via gradual sell strategy,
-// industry outputs via aiSellIndustryOutputs).
-export function tickAIMonthly(state) {
+// Weekly hook: drip-sell harvested inventory + industry outputs. Run cada 7
+// días para que la góndola se reabastezca con más frecuencia (antes era
+// mensual, lo cual dejaba al off-market acumulándose entre rotaciones).
+export function tickAIWeekly(state) {
   for (const ai of state.aiFarmers) {
     aiTrySellInventory(state, ai);       // drip-sell harvested crops/minerals
     aiSellIndustryOutputs(state, ai);    // industry outputs (separate flow)
+  }
+}
+
+// Monthly hook: AI prunes unprofitable industries, reopens recovered ones,
+// tops up inputs. Las ventas se mudaron a tickAIWeekly.
+export function tickAIMonthly(state) {
+  for (const ai of state.aiFarmers) {
     aiTopUpIndustryInputs(state, ai);
     aiTryCloseIndustry(state, ai);
     aiTryReopenIndustry(state, ai);      // recover when margin turns positive again
