@@ -93,5 +93,11 @@ export function populationSpend(state) {
       c.wageFund += gap;
       c.treasury -= gap;
     }
+
+    // Series para diagnóstico de la dinámica poblacional. Push diario.
+    c.populationHistory ||= [];
+    c.populationHistory.push(c.population);
+    c.nutritionDayHistory ||= [];
+    c.nutritionDayHistory.push(nutritionAcquired);
   }
 }

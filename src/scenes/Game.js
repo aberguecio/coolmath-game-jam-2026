@@ -1072,8 +1072,18 @@ export class Game extends Phaser.Scene {
       this.chartGroup.add(t); this.chartLabels.push(t);
     };
 
-    // Section header
+    // Section header + botón para abrir el chart de población
     ls(colA, infoTop, '── DEMOGRAPHICS ──', '#7a8694', '10px');
+    const popBtnBg = this.add.rectangle(x + w - 130, infoTop - 2, 110, 16, 0x2a4a6a)
+      .setOrigin(0, 0).setDepth(57).setInteractive({ useHandCursor: true });
+    const popBtnTxt = this.add.text(x + w - 75, infoTop + 6, '🏘 Open chart', {
+      fontFamily: 'monospace', fontSize: '10px', color: '#cdd6df',
+    }).setOrigin(0.5).setDepth(58);
+    popBtnBg.on('pointerover', () => popBtnBg.setFillStyle(0x3a6090));
+    popBtnBg.on('pointerout', () => popBtnBg.setFillStyle(0x2a4a6a));
+    popBtnBg.on('pointerdown', () => this.openPopulationChartFor(countryId));
+    this.chartGroup.add(popBtnBg); this.chartGroup.add(popBtnTxt);
+    this.chartLabels.push(popBtnBg, popBtnTxt);
 
     // Row helper: prints the label text and an [i] icon to its right with the
     // given explanation. Keeps the demographics/economy block readable and
@@ -2017,6 +2027,17 @@ export class Game extends Phaser.Scene {
     this.togglePriceChart(true);
   }
 
+  // Abre el chart directo en modo population. pid se mantiene por si el user
+  // después cambia a otro modo del toggle.
+  openPopulationChartFor(cid) {
+    const s = this.state;
+    s.ui.priceChartCid = cid;
+    if (!s.ui.priceChartPid) s.ui.priceChartPid = 'wheat';   // default por si el user cambia de modo
+    if (!s.ui.priceChartDays) s.ui.priceChartDays = 365;     // pop drift se ve mejor en ventanas largas
+    s.ui.priceChartMode = 'population';
+    this.togglePriceChart(true);
+  }
+
   togglePriceChart(open) {
     const s = this.state;
     if (open && !s.ui.priceChartOpen) this.enterModal();
@@ -2035,12 +2056,13 @@ export class Game extends Phaser.Scene {
   // está en la fuente de datos, las series, las stats y el formato de los Y labels.
   refreshPriceChartModal() {
     const s = this.state;
-    const pid = s.ui.priceChartPid;
     const cid = s.ui.priceChartCid;
-    if (!pid || !cid) return;
-    const def = PRODUCIBLES[pid];
-    if (!def) return;
+    if (!cid) return;
     const mode = s.ui.priceChartMode || 'price';
+    // Modo 'population' ignora pid (es por country, no por producible).
+    const pid = s.ui.priceChartPid;
+    const def = mode === 'population' ? null : PRODUCIBLES[pid];
+    if (mode !== 'population' && (!pid || !def)) return;
 
     for (const n of this.priceChartDynamic) n.destroy();
     this.priceChartDynamic = [];
@@ -2103,7 +2125,7 @@ export class Game extends Phaser.Scene {
         const unmet = sumDI - sumC;
         return { line: `30d demand ${sumDI}u (unmet ${unmet}u)   ·   30d supply ${sumSI}u (sold ${sumS}u)   ·   ${smp.length}d` };
       };
-    } else { // pressure — gap breakdown
+    } else if (mode === 'pressure') {
       samplesRaw = (s.market.snapshot?.[cid]?.[pid] || []).slice();
       series = [
         { key: 'flowGap',  label: 'flowGap',  color: 0x6ee79a, width: 2 },
@@ -2115,19 +2137,56 @@ export class Game extends Phaser.Scene {
         const lr = smp[smp.length - 1];
         return { line: `α=${(lr.alpha||0).toFixed(2)}   ·   flowGap=${(lr.flowGap||0).toFixed(2)}   ·   stockGap=${(lr.stockGap||0).toFixed(2)}   ·   gap=${(lr.gap||0).toFixed(2)}   ·   Δprice/día ≈ ${((lr.gap||0)*100).toFixed(2)}%` };
       };
+    } else { // population — dinámica demográfica + ratio de nutrición
+      const c = s.countries[cid];
+      const reg = COUNTRIES[cid];
+      const popHist = c?.populationHistory || [];
+      const nutHist = c?.nutritionDayHistory || [];
+      const N = Math.min(popHist.length, nutHist.length);
+      const WAGES_REF = { nut: 0.1, wellBeing: 1.2 };  // mismos valores que Population.js
+      const popBase = reg?.population || 1;
+      samplesRaw = [];
+      for (let i = 0; i < N; i++) {
+        const pop = popHist[i];
+        const wb = pop * WAGES_REF.nut * WAGES_REF.wellBeing;
+        samplesRaw.push({
+          popRatio: pop / popBase,
+          nutRatio: wb > 0 ? nutHist[i] / wb : 0,
+        });
+      }
+      series = [
+        { key: 'popRatio', label: 'Pop ratio',       color: 0x60b3ff, width: 2 },
+        { key: 'nutRatio', label: 'Nutrition ratio', color: 0x6ee79a, width: 2 },
+      ];
+      yUnit = ''; titleIcon = '🏘';
+      statsFn = (smp) => {
+        const lr = smp[smp.length - 1];
+        const last30 = smp.slice(-30);
+        const avgNut = last30.reduce((a, r) => a + r.nutRatio, 0) / Math.max(1, last30.length);
+        let status;
+        if (avgNut >= 1)      status = '📈 Well-fed';
+        else if (avgNut >= 0.83) status = '⚖️ Surviving';
+        else if (avgNut >= 0.5)  status = '⚠️ Underfed';
+        else                     status = '💀 Famine';
+        return {
+          line: `Pop ${Math.round(s.countries[cid].population)} (×${(lr.popRatio||0).toFixed(2)})   ·   30d nutrition=${(avgNut*100).toFixed(0)}% of well-being   ·   ${status}`,
+        };
+      };
     }
 
-    this.priceChartFrame.group.list[2].setText(
-      `${titleIcon}  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`,
-    );
+    const titleLabel = mode === 'population'
+      ? `${titleIcon}  Population & Nutrition — ${COUNTRIES[cid]?.name ?? cid}`
+      : `${titleIcon}  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`;
+    this.priceChartFrame.group.list[2].setText(titleLabel);
 
     // ---- Mode toggle (3 botones) + Date pills en la misma fila ----
     const toggleY = contentTop;
     const modes = [
-      { id: 'price',    label: 'Price'    },
-      { id: 'stocks',   label: 'Stocks'   },
-      { id: 'flows',    label: 'Flows'    },
-      { id: 'pressure', label: 'Pressure' },
+      { id: 'price',      label: 'Price'    },
+      { id: 'stocks',     label: 'Stocks'   },
+      { id: 'flows',      label: 'Flows'    },
+      { id: 'pressure',   label: 'Pressure' },
+      { id: 'population', label: 'Pop'      },
     ];
     let tgX = x + 18;
     for (const m of modes) {

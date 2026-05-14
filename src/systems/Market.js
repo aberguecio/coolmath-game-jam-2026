@@ -56,6 +56,10 @@ export function createCountriesState() {
       // === Inflation tracking ====================================================
       priceIndex: 1.0,                  // EMA of basket vs basePrice; starts at 1
       priceIndexHistory: [1.0],         // 360-day rolling
+      // Series para visualizar dinámicas poblacionales (Country Chart modal).
+      // Push una entrada por día desde populationSpend (al final del tick).
+      populationHistory: [c.population],
+      nutritionDayHistory: [],          // nutricion adquirida por día (suma sobre foods)
     };
     for (const pid of PRODUCIBLE_IDS) {
       runtime[id].tradeBalanceEMA[pid] = 0;
