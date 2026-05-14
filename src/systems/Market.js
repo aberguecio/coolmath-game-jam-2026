@@ -32,12 +32,22 @@ export function createCountriesState() {
       population: c.population,
       consumption: { ...c.consumption },     // seed inicial del consumptionHistory + peso del basket de priceIndex + escalado por eventos/yearly. Ya NO drena marketStock (la limpieza lo sacó).
       // === Flow counters ==========================================================
-      // Toda escritura pasa por _recordSupply/_recordConsumption.
-      consumptionHistory: {},                // ring 90d: compras reales por pid (alimenta target dinámico)
+      // Realizado: lo que efectivamente cambió de mano. Escrito vía
+      // _recordSupply/_recordConsumption desde executeTransaction.
+      consumptionHistory: {},                // ring 90d: compras reales por pid
       supplyHistory: {},                     // ring 90d: ventas reales por pid
+      // Intent: lo que los actores QUISIERON comprar/vender al precio actual,
+      // independiente de si encontraron contraparte. Escrito vía
+      // _recordDemandIntent/_recordSupplyIntent ANTES del stock check.
+      // Invariantes: demandIntentHistory ≥ consumptionHistory por día;
+      // supplyIntentHistory ≥ supplyHistory por día.
+      demandIntentHistory: {},
+      supplyIntentHistory: {},
       // Acumuladores del día actual — rotados a sus _History al inicio de cada tickMarket.
       supplyToday: {},
       consumptionDay: {},
+      demandIntentToday: {},
+      supplyIntentToday: {},
       preferenceModifiers: {},
       tradeBalanceEMA: {},
       decisionLog: {},
@@ -59,6 +69,11 @@ export function createCountriesState() {
       const seed = isFood(pid) ? (c.consumption[pid] || 0) : 0;
       runtime[id].consumptionHistory[pid] = new Array(90).fill(seed);
       runtime[id].supplyHistory[pid] = new Array(90).fill(0);
+      // demandIntentHistory: mismo seed que consumption — al boot la población
+      // ya tiene intención de compra equivalente a su consumo baseline.
+      runtime[id].demandIntentHistory[pid] = new Array(90).fill(seed);
+      // supplyIntentHistory: arranca en 0 — al boot todavía nadie ofreció.
+      runtime[id].supplyIntentHistory[pid] = new Array(90).fill(0);
     }
   }
   return runtime;
@@ -83,6 +98,29 @@ function _recordConsumption(country, pid, units) {
 // Exposed wrapper para callers fuera de Market.js (Population.js lo usa).
 export function recordConsumption(country, producibleId, units) {
   _recordConsumption(country, producibleId, units);
+}
+
+// Intent recorders. Llamados ANTES del check de stock por los capture sites
+// (Population.js, AISales.js, Game.js Sell button). Lo que cada lado quiso
+// hacer al precio actual, independiente de si encontró contraparte.
+function _recordDemandIntent(country, pid, units) {
+  if (!country || units <= 0) return;
+  country.demandIntentToday = country.demandIntentToday || {};
+  country.demandIntentToday[pid] = (country.demandIntentToday[pid] || 0) + units;
+}
+
+function _recordSupplyIntent(country, pid, units) {
+  if (!country || units <= 0) return;
+  country.supplyIntentToday = country.supplyIntentToday || {};
+  country.supplyIntentToday[pid] = (country.supplyIntentToday[pid] || 0) + units;
+}
+
+export function recordDemandIntent(country, producibleId, units) {
+  _recordDemandIntent(country, producibleId, units);
+}
+
+export function recordSupplyIntent(country, producibleId, units) {
+  _recordSupplyIntent(country, producibleId, units);
 }
 
 // =============================================================================
@@ -112,8 +150,10 @@ export function recomputeTargetStocks(state) {
 // Pares (acumulador-del-día → ring de 90 días) que tickMarket rota en cada tick.
 // Para agregar un nuevo counter, una línea más.
 const ROTATE_PAIRS = [
-  ['supplyToday',    'supplyHistory'],
-  ['consumptionDay', 'consumptionHistory'],
+  ['supplyToday',       'supplyHistory'],
+  ['consumptionDay',    'consumptionHistory'],
+  ['supplyIntentToday', 'supplyIntentHistory'],
+  ['demandIntentToday', 'demandIntentHistory'],
 ];
 
 export function initMarket(state) {
@@ -223,24 +263,47 @@ export function tickMarket(state) {
     }
   }
 
-  // Per-country price update via stock gap.
-  //   target > 0  → gap = (target − inv) / target en [−∞, 1]
-  //   target = 0  → gap = −1 siempre (no hay consumidor observado → el ítem
-  //                 no tiene demanda real, el precio decae a tasa máxima
-  //                 hasta absoluteMinPrice). Aplica exista o no exista stock:
-  //                 sin compradores el precio carece de significado económico
-  //                 y debe colapsar al piso del modelo.
+  // Per-country price update — gap mixto (flow + stock), bounded by construction.
+  //
+  //   flowGap  = (demand90 − supply90) / max(demand90, supply90, baseline)   ∈ (−1, +1)
+  //   stockGap = (target − inv) / max(target, inv, baseline)                 ∈ (−1, +1)
+  //   alpha    = flowConfidence / (flowConfidence + stockConfidence)          ∈ [0, 1]
+  //   gap      = alpha × flowGap + (1 − alpha) × stockGap                    ∈ (−1, +1)
+  //
+  // Sin clamps: cada bound emerge de la división por un denominador robusto
+  // y de la combinación convexa.
   for (const cid of COUNTRY_IDS) {
+    const c = state.countries[cid];
     for (const pid of PRODUCIBLE_IDS) {
-      const target = m.targetStock[cid][pid] || 0;
       const inv = m.inventory[cid][pid] || 0;
-      const gap = target > 0 ? (target - inv) / target : -1;
+      const baseline = (c.consumption?.[pid] || 0) + 1;
+
+      // Flow signal: intent buyers vs intent sellers (90d)
+      const dh = c.demandIntentHistory?.[pid] || [];
+      const sh = c.supplyIntentHistory?.[pid] || [];
+      const d90 = dh.length > 0 ? dh.reduce((a, v) => a + v, 0) / dh.length : 0;
+      const s90 = sh.length > 0 ? sh.reduce((a, v) => a + v, 0) / sh.length : 0;
+      const flowScale = Math.max(d90, s90, baseline);
+      const flowGap = (d90 - s90) / flowScale;
+
+      // Stock signal: target buffer vs current inventory
+      const target = m.targetStock[cid][pid] || 0;
+      const stockScale = Math.max(target, inv, baseline);
+      const stockGap = (target - inv) / stockScale;
+
+      // Confidence-weighted mix (sin alpha hardcodeado)
+      const ch = c.consumptionHistory?.[pid] || [];
+      const cons90 = ch.length > 0 ? ch.reduce((a, v) => a + v, 0) / ch.length : 0;
+      const flowConfidence = (d90 + s90) / (baseline * 2);
+      const stockConfidence = cons90 / baseline;
+      const totalConf = flowConfidence + stockConfidence + 0.001;
+      const alpha = flowConfidence / totalConf;
+      const gap = alpha * flowGap + (1 - alpha) * stockGap;
+
       const noise = (Math.random() * 2 - 1) * MARKET.noiseAmp;
       const newPrice = m.prices[cid][pid] * (1 + gap * MARKET.responsiveness + noise);
       m.prices[cid][pid] = Math.max(MARKET.absoluteMinPrice, newPrice);
       m.history[cid][pid].push(m.prices[cid][pid]);
-      // History is unbounded — push is O(1) and memory cost is small (one
-      // float per producible × country × day). A 50-year game ≈ 10MB.
     }
   }
 

@@ -32,10 +32,6 @@ export const MARKET = {
   stockBufferDays: 30,        // target inventory = expected daily demand × this
   responsiveness: 0.01,       // max daily price change is ±1% (gap × responsiveness, gap ∈ [−1, 1])
   noiseAmp: 0.005,            // tiny daily noise so prices don't freeze flat
-  // Elasticity bounds for supply response (production = base × clamped factor).
-  // Stops a tiny country from producing 0 OR exploding to infinity in extreme conditions.
-  elasticityMin: 0.05,
-  elasticityMax: 4.0,
   // Production responds to prices via a pure delay tied to each commodity's growthDays:
   // the DECISION to ramp up is instant, but new supply only arrives `growthDays` later.
   // This produces a natural cobweb cycle (high price → plant a lot → harvest hits,

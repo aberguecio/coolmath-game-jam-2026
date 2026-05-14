@@ -12,7 +12,7 @@
 // player uses, so AI and player share one code path.
 
 import { AI } from '../data/tunables.js';
-import { priceMA, sellFromInventory, inventoryFor } from './Market.js';
+import { priceMA, sellFromInventory, inventoryFor, recordSupplyIntent } from './Market.js';
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -34,6 +34,7 @@ export function aiTrySellInventory(state, ai) {
     // comiendo la rentabilidad.
     if (consumption > 0 && qty > cap) {
       const sellQty = Math.ceil(qty - cap);
+      recordSupplyIntent(state.countries[cid], pid, sellQty);
       sellFromInventory(state, ai.id, pid, sellQty, cid);
       continue;
     }
@@ -54,6 +55,7 @@ export function aiTrySellInventory(state, ai) {
     const dynamicRate = AI.sellRate * priceMult * stockPressure;
 
     const sellQty = Math.max(1, Math.floor(qty * dynamicRate));
+    recordSupplyIntent(state.countries[cid], pid, sellQty);
     sellFromInventory(state, ai.id, pid, sellQty, cid);
   }
 }

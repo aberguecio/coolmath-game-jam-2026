@@ -5,7 +5,7 @@
 
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS } from '../data/countries.js';
-import { MARKET, ECONOMY_DEFAULTS } from '../data/tunables.js';
+import { ECONOMY_DEFAULTS } from '../data/tunables.js';
 
 function basePriceOf(def) {
   return def?.market?.basePrice ?? ECONOMY_DEFAULTS.basePrice ?? 1;
@@ -19,8 +19,11 @@ function plantingDecision(state, country, producibleId) {
   const ratio = localPrice / basePrice;
   const reg = COUNTRIES[country.id];
   const responsiveness = reg?.supplyResponsiveness ?? 1.0;
-  const factor = 1 + (ratio - 1) * responsiveness;
-  return Math.max(MARKET.elasticityMin, Math.min(MARKET.elasticityMax, factor));
+  // Sin clamp — el factor se usa sólo para UI/diagnóstico (elasticityFor /
+  // elasticityTargetFor). El bot real consume expectedPriceAt (Forecast.js)
+  // que ya está bounded by smooth math. Si vemos números absurdos en el
+  // panel, sirven como diagnóstico, no como bug.
+  return 1 + (ratio - 1) * responsiveness;
 }
 
 export function tickProductionDecisions(state) {

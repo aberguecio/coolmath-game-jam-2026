@@ -9,7 +9,7 @@ import { COUNTRIES, COUNTRY_IDS } from '../data/countries.js';
 import { effectiveTaxRates } from '../data/taxRates.js';
 import { WAGES } from '../data/tunables.js';
 import { executeTransaction } from './Transactions.js';
-import { recordConsumption } from './Market.js';
+import { recordConsumption, recordDemandIntent } from './Market.js';
 
 export function populationSpend(state) {
   for (const cid of COUNTRY_IDS) {
@@ -49,8 +49,10 @@ export function populationSpend(state) {
 
     for (const cand of candidates) {
       if (budget <= 0 || nutritionAcquired >= nutritionTarget) break;
-      const inv = m.inventory[cid][cand.pid] || 0;
-      if (inv <= 0) continue;
+      // 1. Computar la intención de compra ANTES del check de stock. Eso
+      //    incluye lo que la población querría aunque la góndola esté vacía
+      //    — el signal que necesita el price formation para no colapsar el
+      //    precio en stockouts.
       const allocate = budget * (cand.score / totalScore);
       const rates = effectiveTaxRates(state, cid);
       const unitTotal = cand.price * (1 + rates.sale);
@@ -59,7 +61,14 @@ export function populationSpend(state) {
       // alcanzar el target nutricional.
       const remainingNutrition = Math.max(0, nutritionTarget - nutritionAcquired);
       const maxByNutrition = cand.nutrition > 0 ? remainingNutrition / cand.nutrition : wantUnits;
-      const buyUnits = Math.min(wantUnits, inv, maxByNutrition);
+      const demandUnits = Math.min(wantUnits, maxByNutrition);
+      if (demandUnits <= 0) continue;
+      recordDemandIntent(c, cand.pid, demandUnits);
+
+      // 2. Ahora sí mirar stock para realizar la compra efectiva.
+      const inv = m.inventory[cid][cand.pid] || 0;
+      if (inv <= 0) continue;
+      const buyUnits = Math.min(demandUnits, inv);
       if (buyUnits <= 0) continue;
       const r = executeTransaction(state, {
         sellerId: 'foreign',

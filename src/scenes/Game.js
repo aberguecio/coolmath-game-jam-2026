@@ -11,7 +11,7 @@ import {
 import { tickClock, setSpeed, formatDate } from '../systems/Clock.js';
 import {
   tickMarket, priceTrend, tickCountriesYearly,
-  sellFromInventory, buyFromGlobal, inventoryOf,
+  sellFromInventory, buyFromGlobal, inventoryOf, recordSupplyIntent,
   elasticityFor, elasticityTargetFor,
   populationSpend, marketInventoryOf,
   offMarketInventoryFor,
@@ -1859,6 +1859,9 @@ export class Game extends Phaser.Scene {
         sellBg.on('pointerover', () => sellBg.setFillStyle(0x3aaa6a));
         sellBg.on('pointerout', () => sellBg.setFillStyle(0x2a8a5a));
         sellBg.on('pointerdown', () => {
+          // Capturar supply intent del player ANTES de la venta — refleja
+          // su intención al precio actual, exista o no buyer del lado opuesto.
+          recordSupplyIntent(s.countries[cid], def.id, qty);
           const r = sellFromInventory(s, 'player', def.id, qty, cid);
           if (r.ok) {
             pushLog(s, `Sold ${r.units}u ${def.name} → $${r.revenue} (${cid})`);
