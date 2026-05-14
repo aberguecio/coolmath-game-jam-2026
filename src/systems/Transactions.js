@@ -9,7 +9,6 @@
 // types:
 //   'sale'   retail (population buys from market)        — sale tax
 //   'b2b'    company-to-company / industry buys input    — b2b tax
-//   'import' cross-country arrival                       — import tax
 //
 // sellerId / buyerId may be: 'player' | aiId | 'population' | 'treasury' | 'foreign'
 //
@@ -17,7 +16,6 @@
 
 import { PRODUCIBLES } from '../data/producibles.js';
 import { effectiveTaxRates } from '../data/taxRates.js';
-import { transportCost } from '../data/distances.js';
 import { PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { logEvent } from '../state/GameState.js';
 
@@ -52,7 +50,6 @@ export function executeTransaction(state, params) {
     productId, units, unitPrice,
     countryOfTransaction,
     type = 'sale',
-    sellerCountryId,
   } = params;
 
   if (!Number.isFinite(units) || units <= 0) {
@@ -72,10 +69,7 @@ export function executeTransaction(state, params) {
   const rates = effectiveTaxRates(state, countryOfTransaction);
   const rate = rates[type] ?? rates.sale ?? 0;
   const taxPaid = grossRevenue * rate;
-  const tCost = (sellerCountryId && sellerCountryId !== countryOfTransaction)
-    ? transportCost(sellerCountryId, countryOfTransaction, units)
-    : 0;
-  const totalCost = grossRevenue + taxPaid + tCost;
+  const totalCost = grossRevenue + taxPaid;
 
   const buyerWallet = walletOf(state, buyerId);
   const sellerWallet = walletOf(state, sellerId);
@@ -87,10 +81,9 @@ export function executeTransaction(state, params) {
   // monthlySalary), paid by the owner directly into wageFund.
   const wagePaid = 0;
   const netToSeller = grossRevenue;
-  const sellerCountry = sellerCountryId || countryOfTransaction;
 
   const txCountry = state.countries[countryOfTransaction];
-  const sellerCountryRuntime = state.countries[sellerCountry];
+  const sellerCountryRuntime = txCountry;
 
   // === Pre-check: buyer must be solvent before any mutation.
   if (isRealBuyer) {
@@ -141,8 +134,8 @@ export function executeTransaction(state, params) {
     day: state.time.totalDays,
     type, productId, units, unitPrice,
     sellerId, buyerId,
-    countryOfTransaction, sellerCountryId: sellerCountry,
-    grossRevenue, taxPaid, wagePaid, transportPaid: tCost, netToSeller,
+    countryOfTransaction,
+    grossRevenue, taxPaid, wagePaid, transportPaid: 0, netToSeller,
   });
   if (state.ledger.length > 200) state.ledger.shift();
 
@@ -155,11 +148,11 @@ export function executeTransaction(state, params) {
     countryId: countryOfTransaction, actorId,
     summary: `${type} ${units}u ${productId} @ $${Math.round(unitPrice)} in ${countryOfTransaction}`,
     amount: Math.round(grossRevenue),
-    meta: { sellerId, buyerId, units, unitPrice, taxPaid, transportPaid: tCost },
+    meta: { sellerId, buyerId, units, unitPrice, taxPaid },
   });
 
   return {
     ok: true,
-    grossRevenue, taxPaid, wagePaid, transportPaid: tCost, netToSeller,
+    grossRevenue, taxPaid, wagePaid, transportPaid: 0, netToSeller,
   };
 }

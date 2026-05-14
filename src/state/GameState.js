@@ -6,7 +6,6 @@ import { initMarketSnapshot } from '../systems/MarketHistory.js';
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID, COUNTRIES } from '../data/countries.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { TAX_RATES } from '../data/taxRates.js';
-import { DISTANCES } from '../data/distances.js';
 
 const TUTORIAL_LS_KEY = 'coolmath:tutorial';
 
@@ -14,16 +13,11 @@ const TUTORIAL_LS_KEY = 'coolmath:tutorial';
 // Boot-time validation: registries must cross-reference each other consistently.
 // =============================================================================
 function validateRegistries() {
-  // Each country's taxRatesId must exist; distances must be symmetric and complete.
+  // Each country's taxRatesId must exist.
   for (const cid of COUNTRY_IDS) {
     const reg = COUNTRIES[cid];
     if (reg.taxRatesId && !TAX_RATES[reg.taxRatesId]) {
       throw new Error(`Country ${cid} references missing taxRatesId "${reg.taxRatesId}"`);
-    }
-    if (!DISTANCES[cid]) throw new Error(`Country ${cid} missing in distances.js`);
-    for (const other of COUNTRY_IDS) {
-      if (DISTANCES[cid][other] == null) throw new Error(`distances.${cid}.${other} missing`);
-      if (DISTANCES[cid][other] !== DISTANCES[other][cid]) throw new Error(`distances asymmetric: ${cid}↔${other}`);
     }
   }
 }
@@ -96,11 +90,7 @@ function generateTilesFor(countryId, seed) {
 }
 
 const CITY_POSITIONS = {
-  home:    { x: CITY.x, y: CITY.y },
-  usa:     { x: 3,      y: 4 },
-  china:   { x: 11,     y: 11 },
-  brazil:  { x: 8,      y: 9 },
-  germany: { x: 5,      y: 2 },
+  home: { x: CITY.x, y: CITY.y },
 };
 
 function createCitiesFor() {
@@ -173,9 +163,8 @@ export function createInitialState() {
       cash: PLAYER_START.cash,
       bankrupt: false,
       wcCooldownUntilDay: 0,
-      // Inventory partitioned by country — the player cannot teleport goods.
-      // Buy in Riverside → stays in inventoryByCountry.usa. To move it home
-      // the player must (eventually) found an exporter; see TODO.md.
+      // Inventory partitioned by country — shape [cid][pid].
+      // With one town this is { home: {} }; re-introducing towns adds entries to COUNTRIES.
       inventoryByCountry: Object.fromEntries(COUNTRY_IDS.map(cid => [cid, {}])),
     },
     maps,

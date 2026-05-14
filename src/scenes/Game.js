@@ -3,7 +3,6 @@ import { GAME_WIDTH, GAME_HEIGHT } from '../config.js';
 import { MAP, TIME, FARMING } from '../data/tunables.js';
 import { PRODUCIBLES, PRODUCIBLE_LIST } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
-import { DISTANCES } from '../data/distances.js';
 import { EVENT_TYPES } from '../data/eventTypes.js';
 import { TUTORIAL_STEPS } from '../data/tutorialSteps.js';
 import {
@@ -126,7 +125,6 @@ export class Game extends Phaser.Scene {
     this.buildStockChartModal();
     this.buildEventsModal();
     this.buildCompaniesModal();
-    this.buildWorldModal();
     this.buildTutorialOverlay();
     this.offerMarkers = [];
 
@@ -153,7 +151,6 @@ export class Game extends Phaser.Scene {
       if (this.state.ui.marketOpen) { this.toggleMarket(false); return; }
       if (this.state.ui.eventsOpen) { this.toggleEvents(false); return; }
       if (this.state.ui.companiesOpen) { this.toggleCompanies(false); return; }
-      if (this.state.ui.worldOpen) { this.toggleWorld(false); return; }
       if (this.state.ui.countryChartOpen) { this.closeCountryChart(); return; }
       if (this.state.ui.bankOpen) { this.toggleBank(false); return; }
       this.state.selection.tileId = null;
@@ -399,11 +396,6 @@ export class Game extends Phaser.Scene {
     const marketX = place(ICON_W);
     this.marketBtn = this.makeIconButton(marketX, ICON_W, '📈', 0xffb347, 0xffc878,
       () => this.toggleMarket(true), 'Market');
-
-    // WORLD
-    const worldX = place(ICON_W);
-    this.worldBtn = this.makeIconButton(worldX, ICON_W, '🌍', 0x60b3ff, 0x88c8ff,
-      () => this.toggleWorld(true), 'World');
 
     // EVENTS
     const eventsX = place(ICON_W);
@@ -1620,7 +1612,6 @@ export class Game extends Phaser.Scene {
     if (this.state.ui.stockChartOpen) this.refreshStockChartModal();
     if (this.state.ui.eventsOpen) this.refreshEventsModal();
     if (this.state.ui.companiesOpen) this.refreshCompaniesModal();
-    if (this.state.ui.worldOpen) this.refreshWorldModal();
     this.refreshTutorial();
   }
 
@@ -1734,7 +1725,6 @@ export class Game extends Phaser.Scene {
     this.marketCard = { x, y, w, h, tabsY, headerY, rowsTop, rowsBottom };
     this.marketDynamicNodes = [];
     if (!this.state.ui.marketQty) this.state.ui.marketQty = {};
-    if (!this.state.ui.marketCountryId) this.state.ui.marketCountryId = PLAYER_COUNTRY_ID;
 
     // Wheel scroll on the card
     this.bindWheelScroll(card, 'market',
@@ -1774,8 +1764,7 @@ export class Game extends Phaser.Scene {
   refreshMarketModal() {
     const s = this.state;
     if (!s.ui.marketQty) s.ui.marketQty = {};
-    if (!s.ui.marketCountryId) s.ui.marketCountryId = PLAYER_COUNTRY_ID;
-    const cid = s.ui.marketCountryId;
+    const cid = PLAYER_COUNTRY_ID;
 
     for (const node of this.marketDynamicNodes) node.destroy();
     this.marketDynamicNodes = [];
@@ -1783,31 +1772,6 @@ export class Game extends Phaser.Scene {
 
     const { x, w, tabsY, headerY, rowsTop, rowsBottom } = this.marketCard;
     const rowH = 44;
-
-    // ---- Country tabs ----
-    const tabW = (w - 36) / COUNTRY_IDS.length;
-    COUNTRY_IDS.forEach((tcid, i) => {
-      const tx = x + 18 + i * tabW;
-      const active = tcid === cid;
-      const bg = this.add.rectangle(tx, tabsY, tabW - 4, 24,
-        active ? 0xffb347 : 0x243345).setOrigin(0, 0).setDepth(57)
-        .setInteractive({ useHandCursor: true });
-      const txt = this.add.text(tx + (tabW - 4) / 2, tabsY + 12,
-        COUNTRIES[tcid]?.name ?? tcid, {
-          fontFamily: 'monospace', fontSize: '11px',
-          color: active ? '#0f1923' : '#cdd6df',
-          fontStyle: active ? 'bold' : 'normal',
-        }).setOrigin(0.5).setDepth(58);
-      bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
-      bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
-      bg.on('pointerdown', () => {
-        s.ui.marketCountryId = tcid;
-        if (this.scrollState) this.scrollState.market = 0;
-        this.refreshMarketModal();
-      });
-      this.marketGroup.add(bg); this.marketGroup.add(txt);
-      this.marketDynamicNodes.push(bg, txt);
-    });
 
     // ---- Header columns ----
     const colHeaders = [
@@ -2924,198 +2888,6 @@ export class Game extends Phaser.Scene {
         this.companiesFrame.group.add(noInv); this.companiesDynamicNodes.push(noInv);
       }
     });
-  }
-
-  // -----------------------------------------------------------------------
-  // WORLD MODAL — country graph (population/distance/trade volume)
-  // -----------------------------------------------------------------------
-  buildWorldModal() {
-    const frame = this.makeModalFrame({
-      w: 700, h: 540, title: '🌍  WORLD', color: 0x60b3ff,
-      onClose: () => this.toggleWorld(false),
-    });
-    this.worldFrame = frame;
-    this.worldDynamicNodes = [];
-    this.worldGfx = this.add.graphics().setDepth(57);
-    frame.group.add(this.worldGfx);
-  }
-
-  toggleWorld(open) {
-    const s = this.state;
-    if (open && !s.ui.worldOpen) this.enterModal();
-    else if (!open && s.ui.worldOpen) this.exitModal();
-    s.ui.worldOpen = open;
-    this.worldFrame.group.setVisible(open);
-    if (open) this.refreshWorldModal();
-    else {
-      // Destroy interactive children so hidden country circles / chips don't
-      // capture clicks that should hit other modals (e.g. the country chart).
-      for (const n of this.worldDynamicNodes) n.destroy();
-      this.worldDynamicNodes = [];
-      this.worldGfx?.clear();
-    }
-    this.refreshTopBar();
-  }
-
-  // Draw an arrow from (x1,y1) to (x2,y2). Stops short of the destination so
-  // the arrowhead is visible against the destination node.
-  drawArrow(gfx, x1, y1, x2, y2, color, opacity, thickness, headLen = 10, headStop = 0) {
-    const dx = x2 - x1, dy = y2 - y1;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1) return;
-    const nx = dx / len, ny = dy / len;
-    const ex = x2 - nx * headStop, ey = y2 - ny * headStop;
-    gfx.lineStyle(thickness, color, opacity);
-    gfx.lineBetween(x1, y1, ex, ey);
-    // Arrowhead — filled triangle
-    const baseX = ex - nx * headLen, baseY = ey - ny * headLen;
-    const px = -ny, py = nx; // perpendicular
-    const wHead = Math.max(4, headLen * 0.5);
-    gfx.fillStyle(color, opacity);
-    gfx.beginPath();
-    gfx.moveTo(ex, ey);
-    gfx.lineTo(baseX + px * wHead, baseY + py * wHead);
-    gfx.lineTo(baseX - px * wHead, baseY - py * wHead);
-    gfx.closePath();
-    gfx.fillPath();
-  }
-
-  refreshWorldModal() {
-    const s = this.state;
-    for (const n of this.worldDynamicNodes) n.destroy();
-    this.worldDynamicNodes = [];
-    this.worldGfx.clear();
-
-    const { x, y, w, h, contentTop, contentBottom } = this.worldFrame;
-    if (!s.ui.worldSelectedPid) s.ui.worldSelectedPid = null;            // null = total
-    const selectedPid = s.ui.worldSelectedPid;
-
-    // ---- Producible chip selector at top ----
-    const chipsTop = contentTop;
-    const chipW = 56, chipH = 22, chipGap = 4;
-    const totalChips = 1 + PRODUCIBLE_LIST.length;          // "Total" + each producible
-    const chipsPerRow = Math.floor((w - 36) / (chipW + chipGap));
-    const rowsCount = Math.ceil(totalChips / chipsPerRow);
-    const chipsAreaH = rowsCount * (chipH + chipGap);
-
-    const placeChip = (i, label, color, swatch, isActive, onClick) => {
-      const row = Math.floor(i / chipsPerRow);
-      const col = i % chipsPerRow;
-      const cx = x + 18 + col * (chipW + chipGap);
-      const cy = chipsTop + row * (chipH + chipGap);
-      const bg = this.add.rectangle(cx, cy, chipW, chipH,
-        isActive ? color : 0x243345).setOrigin(0, 0).setDepth(57)
-        .setInteractive({ useHandCursor: true });
-      const txt = this.add.text(cx + chipW / 2, cy + chipH / 2, label, {
-        fontFamily: 'monospace', fontSize: '9px',
-        color: isActive ? '#0f1923' : '#cdd6df',
-        fontStyle: isActive ? 'bold' : 'normal',
-      }).setOrigin(0.5).setDepth(58);
-      if (swatch != null) {
-        const dot = this.add.rectangle(cx + 4, cy + chipH / 2, 6, 6, swatch).setOrigin(0, 0.5).setDepth(58);
-        this.worldFrame.group.add(dot); this.worldDynamicNodes.push(dot);
-      }
-      bg.on('pointerover', () => { if (!isActive) bg.setFillStyle(0x3a4d63); });
-      bg.on('pointerout', () => { if (!isActive) bg.setFillStyle(0x243345); });
-      bg.on('pointerdown', onClick);
-      this.worldFrame.group.add(bg); this.worldFrame.group.add(txt);
-      this.worldDynamicNodes.push(bg, txt);
-    };
-
-    placeChip(0, 'Total', 0x60b3ff, null, selectedPid === null, () => {
-      s.ui.worldSelectedPid = null; this.refreshWorldModal();
-    });
-    PRODUCIBLE_LIST.forEach((def, i) => {
-      placeChip(i + 1, def.name.slice(0, 7), def.color, def.color,
-        selectedPid === def.id,
-        () => { s.ui.worldSelectedPid = def.id; this.refreshWorldModal(); });
-    });
-
-    // ---- Country graph layout ----
-    const graphTop = chipsTop + chipsAreaH + 8;
-    const graphBottom = contentBottom - 24;
-    const cx = x + w / 2;
-    const cyCenter = (graphTop + graphBottom) / 2;
-    const radius = Math.min(w * 0.42, (graphBottom - graphTop) * 0.42);
-
-    const others = COUNTRY_IDS.filter(c => c !== PLAYER_COUNTRY_ID);
-    const positions = { [PLAYER_COUNTRY_ID]: { x: cx, y: cyCenter } };
-    others.forEach((cid, i) => {
-      const angle = (i / others.length) * Math.PI * 2 - Math.PI / 2;
-      positions[cid] = { x: cx + Math.cos(angle) * radius, y: cyCenter + Math.sin(angle) * radius };
-    });
-
-    // ---- Draw edges — dim topology lines between countries ----
-    const nodeRadiusOf = {};
-    const allPop = COUNTRY_IDS.map(c => s.countries[c]?.population || 0);
-    const maxPop = Math.max(...allPop, 1);
-    for (const cid of COUNTRY_IDS) {
-      const pop = s.countries[cid]?.population || 0;
-      nodeRadiusOf[cid] = 12 + (pop / maxPop) * 30;
-    }
-
-    const seen = new Set();
-    for (const a of COUNTRY_IDS) {
-      for (const b of COUNTRY_IDS) {
-        if (a === b) continue;
-        const key = [a, b].sort().join('|');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const pa = positions[a], pb = positions[b];
-        const dist = DISTANCES[a]?.[b] ?? 0;
-        this.worldGfx.lineStyle(1, 0x3a4d63, 0.4);
-        this.worldGfx.lineBetween(pa.x, pa.y, pb.x, pb.y);
-        const mx = (pa.x + pb.x) / 2;
-        const my = (pa.y + pb.y) / 2;
-        const distTxt = this.add.text(mx, my, `${dist}d`, {
-          fontFamily: 'monospace', fontSize: '9px',
-          color: '#566370',
-          backgroundColor: '#0f1923',
-        }).setOrigin(0.5).setDepth(58).setPadding(2, 1, 2, 1);
-        this.worldFrame.group.add(distTxt); this.worldDynamicNodes.push(distTxt);
-      }
-    }
-
-    // ---- Nodes ----
-    for (const cid of COUNTRY_IDS) {
-      const pos = positions[cid];
-      const country = s.countries[cid];
-      const reg = COUNTRIES[cid];
-      const pop = country?.population || 0;
-      const r = nodeRadiusOf[cid];
-
-      const isHome = cid === PLAYER_COUNTRY_ID;
-      const isHere = cid === s.ui.currentMap;
-      const fill = isHome ? 0xffd166 : (isHere ? 0x6ee7b7 : 0x60b3ff);
-
-      const circle = this.add.circle(pos.x, pos.y, r, fill, 0.85)
-        .setDepth(59).setStrokeStyle(2, 0x131e2b)
-        .setInteractive({ useHandCursor: true });
-      circle.on('pointerover', () => circle.setStrokeStyle(2, 0xe8edf3));
-      circle.on('pointerout', () => circle.setStrokeStyle(2, 0x131e2b));
-      circle.on('pointerdown', () => {
-        this.toggleWorld(false);
-        this.openCountryChart(cid);
-      });
-      this.worldFrame.group.add(circle); this.worldDynamicNodes.push(circle);
-
-      const label = this.add.text(pos.x, pos.y - r - 6, reg?.name ?? cid, {
-        fontFamily: 'monospace', fontSize: '11px', color: '#e8edf3', fontStyle: 'bold',
-      }).setOrigin(0.5, 1).setDepth(60);
-      this.worldFrame.group.add(label); this.worldDynamicNodes.push(label);
-
-      const popLabel = this.add.text(pos.x, pos.y + r + 4, `${Math.round(pop)} pop`, {
-        fontFamily: 'monospace', fontSize: '9px', color: '#9aa4ad',
-      }).setOrigin(0.5, 0).setDepth(60);
-      this.worldFrame.group.add(popLabel); this.worldDynamicNodes.push(popLabel);
-    }
-
-    // ---- Legend ----
-    const legend = this.add.text(x + 18, contentBottom - 14,
-      '▶ click a country node to inspect it    │    lines show distance between towns', {
-        fontFamily: 'monospace', fontSize: '9px', color: '#566370',
-      });
-    this.worldFrame.group.add(legend); this.worldDynamicNodes.push(legend);
   }
 
   // -----------------------------------------------------------------------

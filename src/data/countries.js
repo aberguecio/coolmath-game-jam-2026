@@ -1,15 +1,9 @@
-// Town registry. The "country" abstraction is now treated as a town/village.
-// All towns start with the same population (200), same baseline production,
-// consumption, preferences, tax rates and growth — they only differ by name
-// and flag colour. Differentiation emerges from random mineral deposits,
-// player decisions, and AI behaviour, not from hardcoded asymmetries.
-//
-// Internal IDs (home/usa/china/brazil/germany) are KEPT so distances.js,
-// taxRates.js, CITY_POSITIONS, validators and existing imports stay valid.
-// Only the visible `name` changes.
+// Town registry. Single-town configuration — only 'home' exists.
+// Multi-country can be re-introduced by adding entries to COUNTRIES;
+// all loops operate over COUNTRY_IDS so no structural refactor is needed.
 //
 // Per-town fields:
-//   taxRatesId             references TAX_RATES bracket (all towns share homeRates)
+//   taxRatesId             references TAX_RATES bracket
 //   supplyResponsiveness   how aggressively producers pivot to prices
 //   preferences            {pid → weight} food-preference shares for population spending
 
@@ -38,11 +32,7 @@ function makeTown(id, name, flagColor) {
 }
 
 export const COUNTRIES = {
-  home:    makeTown('home',    'Home',      0x6ee7b7),
-  usa:     makeTown('usa',     'Riverside', 0x4a7ec5),
-  china:   makeTown('china',   'Oakdale',   0xc94a3a),
-  brazil:  makeTown('brazil',  'Pinegrove', 0x4ca84c),
-  germany: makeTown('germany', 'Hillcrest', 0xe8e6a0),
+  home: makeTown('home', 'Home', 0x6ee7b7),
 };
 
 export const COUNTRY_IDS = Object.keys(COUNTRIES);

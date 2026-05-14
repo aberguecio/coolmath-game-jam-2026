@@ -378,7 +378,6 @@ export function sellFromInventory(state, ownerId, producibleId, units, countryId
     units: sell,
     unitPrice: price,
     countryOfTransaction: countryId,
-    sellerCountryId: countryId,
     type: 'b2b',
   });
   if (!r.ok) return { ok: false, reason: r.reason };
@@ -402,7 +401,6 @@ export function buyFromGlobal(state, ownerId, producibleId, units, countryId = P
   const buy = Math.min(Math.floor(units), stock);
   if (buy <= 0) return { ok: false, reason: 'Out of stock' };
   const price = state.market.prices?.[countryId]?.[producibleId] || 0;
-  const isImportTax = ownerId !== 'foreign' && countryId !== PLAYER_COUNTRY_ID;
   const r = executeTransaction(state, {
     sellerId: 'foreign',
     buyerId: ownerId,
@@ -410,8 +408,7 @@ export function buyFromGlobal(state, ownerId, producibleId, units, countryId = P
     units: buy,
     unitPrice: price,
     countryOfTransaction: countryId,
-    sellerCountryId: countryId,
-    type: isImportTax ? 'import' : 'sale',
+    type: 'sale',
   });
   if (!r.ok) return { ok: false, reason: r.reason };
   state.market.inventory[countryId][producibleId] -= buy;

@@ -68,7 +68,6 @@ export function populationSpend(state) {
         units: buyUnits,
         unitPrice: cand.price,
         countryOfTransaction: cid,
-        sellerCountryId: cid,
         type: 'sale',
       });
       if (!r.ok) continue;

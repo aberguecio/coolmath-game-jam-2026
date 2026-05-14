@@ -187,6 +187,4 @@ export const FISCAL_CRISIS = {
   wageHaircutFraction: 0.10,   // industries' salary contribution to wageFund cut by this
 };
 
-// Cross-country logistics. Per-pair distances + per-unit shipping fee live in distances.js.
-
 

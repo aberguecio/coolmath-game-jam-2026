@@ -35,38 +35,6 @@ export const EVENT_TYPES = {
     effectId: 'instantTileLoss',
     params: { lossChance: 0.25 },
   },
-  chinaTariffApple: {
-    id: 'chinaTariffApple',
-    label: 'China apple tariff',
-    weight: 1,
-    duration: 90,
-    effectId: 'modifyPreference',
-    params: { country: 'china', producibleId: 'apple', factor: 0.4 },
-  },
-  euWheatBoom: {
-    id: 'euWheatBoom',
-    label: 'EU wheat demand surge',
-    weight: 1,
-    duration: 60,
-    effectId: 'modifyPreference',
-    params: { country: 'germany', producibleId: 'wheat', factor: 1.6 },
-  },
-  brazilCornShortage: {
-    id: 'brazilCornShortage',
-    label: 'Brazil corn shortage',
-    weight: 1,
-    duration: 45,
-    effectId: 'modifyPreference',
-    params: { country: 'brazil', producibleId: 'corn', factor: 1.8 },
-  },
-  usaRecession: {
-    id: 'usaRecession',
-    label: 'US recession',
-    weight: 1,
-    duration: 120,
-    effectId: 'gdpShock',
-    params: { country: 'usa', factor: 0.92 },
-  },
 };
 
 export const EVENT_TYPE_LIST = Object.values(EVENT_TYPES);
