@@ -71,9 +71,7 @@ function aiPickBestVenture(state, ai, tile) {
   let best = null;
   let bestMargin = -Infinity;
 
-  // === Crops ===
   for (const def of PRODUCIBLE_LIST) {
-    if (def.category === 'processed') continue;
     const wantLock = lockTypeForCategory(def.category);
     if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
 

@@ -3,7 +3,7 @@
 // shows up in supply only after `growthDays` because of the FIFO delay log.
 // This is what creates the cobweb dynamics in market sparklines.
 
-import { PRODUCIBLES, PRODUCIBLE_IDS, isTileGrowable } from '../data/producibles.js';
+import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS } from '../data/countries.js';
 import { MARKET, ECONOMY_DEFAULTS } from '../data/tunables.js';
 
@@ -28,7 +28,6 @@ export function tickProductionDecisions(state) {
     const c = state.countries[cid];
     for (const pid of PRODUCIBLE_IDS) {
       const def = PRODUCIBLES[pid];
-      if (!isTileGrowable(pid)) continue;
       if (!c.decisionLog[pid]) c.decisionLog[pid] = [1.0];
       const log = c.decisionLog[pid];
       log.push(plantingDecision(state, c, pid));

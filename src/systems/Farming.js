@@ -319,8 +319,6 @@ export function plantTile(state, tile, producibleId, ownerId = 'player') {
   if (tile.owner !== ownerId) return { ok: false };
   const def = PRODUCIBLES[producibleId];
   if (!def) return { ok: false, reason: 'Unknown producible' };
-  // Processed goods are industry outputs only — they're not plantable on a tile.
-  if (def.category === 'processed') return { ok: false, reason: 'Made in industries, not on tiles' };
   const requiredState = def.requiresPlow ? 'plowed' : 'fallow';
   if (tile.state !== requiredState) {
     return { ok: false, reason: def.requiresPlow ? 'Plow first' : 'Tile not ready' };

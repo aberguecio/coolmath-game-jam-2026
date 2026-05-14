@@ -17,7 +17,7 @@ import {
   offMarketInventoryFor,
 } from '../systems/Market.js';
 import { tickFiscalCrisis } from '../systems/FiscalCrisis.js';
-import { seedIndustries } from '../systems/WorldSeed.js';
+import { seedStarterCrops } from '../systems/WorldSeed.js';
 import {
   tickFarming, buyTile, plowTile, plantTile, harvestTile,
   tileFinanceQuote, expectedYield, effectiveQualityFor,
@@ -103,7 +103,7 @@ export class Game extends Phaser.Scene {
   create() {
     this.state = createInitialState();
     initAIFarmers(this.state);
-    seedIndustries(this.state);
+    seedStarterCrops(this.state);
 
     // Bot que puede tomar el control con la tecla A.
     this.autoplay = new AutoplayController();
@@ -692,7 +692,6 @@ export class Game extends Phaser.Scene {
         // Plowed tile → crops that need plowing.
         if (tile.state === 'plowed') {
           for (const def of PRODUCIBLE_LIST) {
-            if (def.category === 'processed') continue;        // industry-only outputs
             if (def.requiresPlow === false) continue;
             const wantLock = lockTypeForCategory(def.category);
             if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
@@ -1063,7 +1062,7 @@ export class Game extends Phaser.Scene {
         if (!tile.crop) continue;
         if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
         const def = PRODUCIBLES[tile.crop];
-        if (!def || def.category === 'processed') continue;
+        if (!def) continue;
         if (tile.state === 'fallow' || tile.state === 'plowed') nCropFallow++;
         else nCropActive++;
       }

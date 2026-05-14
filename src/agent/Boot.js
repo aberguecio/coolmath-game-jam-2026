@@ -6,7 +6,7 @@
 //
 //   state = createInitialState();
 //   initAIFarmers(state);
-//   seedIndustries(state);
+//   seedStarterCrops(state);
 //
 // Si en algún momento un sistema empieza a depender de `localStorage` u otra
 // API del browser fuera de los try/catch existentes, este archivo es el lugar
@@ -15,12 +15,12 @@
 // cuando localStorage no existe, así que el boot bajo node funciona limpio.
 
 import { createInitialState, initAIFarmers } from '../state/GameState.js';
-import { seedIndustries } from '../systems/WorldSeed.js';
+import { seedStarterCrops } from '../systems/WorldSeed.js';
 
 export function bootHeadlessState() {
   const state = createInitialState();
   initAIFarmers(state);
-  seedIndustries(state);
+  seedStarterCrops(state);
   return state;
 }
 

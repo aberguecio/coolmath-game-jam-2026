@@ -1,25 +1,17 @@
-// Single registry for everything that flows through the economy: raw farm output AND
-// processed industry output. Adding a producible = one entry; no code changes elsewhere.
+// Single registry for everything que se cultiva en la economía. Agregar un
+// producible = una entrada; ningún código fuera de este file cambia.
 //
 // Schema:
 //   id, name, color
-//   category         'annual_crop' | 'perennial_crop' | 'processed'
-//   commodityType    'food' | 'material' (drives population consumption rules)
-//   processStage     'raw' | 'processed' | 'final'
-//   nutritionUnits   (food only) caloric value per unit; 0 for materials
-//
-//   Tile-grown producibles only (skip for processed factory outputs):
-//     actionVerb, seedCost, requiresPlow,
-//     growthDays, growthCurve { base, qualitySlope },
-//     yieldUnits, yieldCurve { base, qualitySlope },
-//     perennial: null | { regrowDays, lifespanDays },
-//     patches?: mineral patch config
-//
-//   Production cost (paid by owner → wageFund, replaces the old wagePortion routing):
-//     harvestCost     (annual & perennial crops) — labor cost per harvest event,
-//                      only charged when autoHarvest fires (auto-mode tile)
-//
-//   market           { basePrice, ...optional overrides }
+//   category         'annual_crop' | 'perennial_crop'
+//   commodityType    'food'    (drives population consumption rules)
+//   nutritionUnits   caloric value per unit
+//   requiresPlow, setupLabor, harvestLabor
+//   growthDays, growthCurve { base, qualitySlope }
+//   yieldUnits, yieldCurve { base, qualitySlope }
+//   perennial: null | { regrowDays, lifespanDays }
+//   consumption.nutritionWeight   peso del basket de priceIndex
+//   market.basePrice              price anchor
 
 export const PRODUCIBLES = {
   // === RAW CROPS (food) =========================================================
@@ -108,12 +100,6 @@ export const PRODUCIBLES = {
 export const PRODUCIBLE_LIST = Object.values(PRODUCIBLES);
 export const PRODUCIBLE_IDS = Object.keys(PRODUCIBLES);
 
-// Helpers used across systems and the IndustryModal.
 export function isFood(producibleId) {
   return PRODUCIBLES[producibleId]?.commodityType === 'food';
-}
-// Tile-buildable producibles only (excludes processed-only outputs).
-export function isTileGrowable(producibleId) {
-  const p = PRODUCIBLES[producibleId];
-  return p && p.category !== 'processed';
 }

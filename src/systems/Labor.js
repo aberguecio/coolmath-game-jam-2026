@@ -41,7 +41,7 @@ export function laborDemandFor(state, cid) {
       if (!tile.crop) continue;
       if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
       const def = PRODUCIBLES[tile.crop];
-      if (!def || def.category === 'processed') continue;
+      if (!def) continue;
       // crops (annual + perennial): only count while in cultivation
       if (tile.state === 'fallow' || tile.state === 'plowed') continue;
       total += tendingLabor;
