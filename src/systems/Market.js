@@ -220,20 +220,15 @@ export function tickMarket(state) {
   // por día — barato y mantiene el target alineado al flujo observado.
   recomputeTargetStocks(state);
 
-  // Per-country: trasladar la pulsación de supply real (lo que vendieron los
-  // agentes hoy) a la góndola. La drainage de la góndola ocurre directamente
-  // en los buyers reales (populationSpend para comida, buyFromGlobal para
-  // industrias/player). No hay más capa macro abstracta.
+  // tradeBalanceEMA — la UI del modal del país lo lee. Refleja la pulsación
+  // diaria de oferta real: positivo cuando hubo ventas hoy (smoothed). Las
+  // unidades de supply YA están en m.inventory porque sellFromInventory y
+  // writeOffToMarket las trasvasan atómicamente — supplyToday acá es puro
+  // signal para la UI/tracking, no un pipeline de movimiento de stock.
   for (const cid of COUNTRY_IDS) {
     const c = state.countries[cid];
     for (const pid of PRODUCIBLE_IDS) {
       const supply = c.supplyToday[pid] || 0;
-      if (supply > 0) {
-        m.inventory[cid][pid] = (m.inventory[cid][pid] || 0) + supply;
-      }
-      // tradeBalanceEMA — la UI del modal del país lo lee. Ahora refleja
-      // sólo el surplus real (positivo si vendieron, neutro si no). Deficits
-      // se ven directamente como caída de m.inventory por los buyers reales.
       const prev = c.tradeBalanceEMA[pid] ?? 0;
       c.tradeBalanceEMA[pid] = prev * 0.85 + (-supply) * 0.15;
     }
@@ -444,7 +439,18 @@ export function sellFromInventory(state, ownerId, producibleId, units, countryId
     type: 'b2b',
   });
   if (!r.ok) return { ok: false, reason: r.reason };
+  // Transferencia atómica de stock: del wallet del vendedor a la góndola del
+  // país. Toda la venta es UNA sola operación — no hay pipeline diferido
+  // (supplyToday → marketStock vía tickMarket) que podría romperse por orden
+  // de operaciones. SRP: sellFromInventory es responsable de todo lo que es
+  // "una venta" (plata + stock + tracking).
   inv[producibleId] = have - sell;
+  if (!state.market.inventory[countryId]) state.market.inventory[countryId] = {};
+  state.market.inventory[countryId][producibleId] =
+    (state.market.inventory[countryId][producibleId] || 0) + sell;
+  // _recordSupply escribe los counters de flujo (supplyToday + componente
+  // local/import) que alimentan target dinámico, freeze de precios y UI.
+  // El stock ya fue transferido arriba — supplyToday es ahora puro signal.
   const sellerHome = walletCountryFor(state, ownerId);
   const isImport = opts.crossCountry ?? (sellerHome != null && sellerHome !== countryId);
   _recordSupply(state.countries[countryId], producibleId, sell, isImport);
@@ -502,7 +508,13 @@ export function writeOffToMarket(state, ownerId, producibleId, units, countryId,
   const have = inv[producibleId] || 0;
   const sell = Math.min(Math.floor(units), have);
   if (sell <= 0) return { ok: false, reason: 'Nothing to write off' };
+  // Transferencia atómica: wallet del owner → góndola del país. Mismo patrón
+  // que sellFromInventory pero sin pasar plata (write-off). Conservación de
+  // stock garantizada por la atomicidad.
   inv[producibleId] = have - sell;
+  if (!state.market.inventory[countryId]) state.market.inventory[countryId] = {};
+  state.market.inventory[countryId][producibleId] =
+    (state.market.inventory[countryId][producibleId] || 0) + sell;
   const sellerHome = walletCountryFor(state, ownerId);
   const isImport = opts.crossCountry ?? (sellerHome != null && sellerHome !== countryId);
   _recordSupply(state.countries[countryId], producibleId, sell, isImport);

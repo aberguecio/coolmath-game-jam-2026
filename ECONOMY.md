@@ -221,9 +221,11 @@ Si la caja está seca, rechaza ofertas. Si el stock está en cero, rechaza compr
 
 ### 5.2 Cómo se llena la góndola
 
-Las unidades entran a la góndola por una sola vía: la **pulsación diaria de oferta**. Cuando un AI farmer vende su cosecha al mayorista, no van directo a la góndola — se acumulan primero en un acumulador del día (`supplyToday`). Al inicio del próximo día, todo lo que se acumuló pasa a la góndola.
+Cuando un agente (AI farmer, industria, exportador) vende al mayorista, la transferencia de stock es **atómica**: las unidades salen del wallet del vendedor y entran a la góndola del país en la misma operación. No hay lag entre "vendió" y "está en la góndola" — la población puede comprarlo el mismo día.
 
-Esto introduce un día de latencia entre "se vendió" y "está disponible para comprar", pero hace que todas las llegadas a la góndola sean uniformes (vengan de productores locales o de exportadores).
+En paralelo, esa venta se registra en un counter del día (`supplyToday`) que alimenta la rotación a `supplyHistory` (90 días), el target dinámico, la UI del modal del país y el price-freeze check. Pero `supplyToday` es **señal**, no pipeline: el stock ya fue transferido cuando se grabó el counter.
+
+Lo mismo aplica para los exportadores entregando un cargo en destino y para los write-offs (cuando una entrega no puede cobrarse, las unidades se donan a la góndola del destino sin pago — pero el movimiento sigue siendo atómico).
 
 ### 5.3 Cómo se vacía la góndola
 
