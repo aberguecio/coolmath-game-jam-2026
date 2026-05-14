@@ -225,10 +225,14 @@ export function tickMarket(state) {
   // Flows mostrarían siempre 0.
   const prevSupplyToday = {};
   const prevConsumptionDay = {};
+  const prevDemandIntentDay = {};
+  const prevSupplyIntentDay = {};
   for (const cid of COUNTRY_IDS) {
     const c = state.countries[cid];
     prevSupplyToday[cid] = { ...(c.supplyToday || {}) };
     prevConsumptionDay[cid] = { ...(c.consumptionDay || {}) };
+    prevDemandIntentDay[cid] = { ...(c.demandIntentToday || {}) };
+    prevSupplyIntentDay[cid] = { ...(c.supplyIntentToday || {}) };
   }
   // Rotar los 2 counters _Today → _History (90 días) y resetear.
   // Tabla declarativa: agregar un par nuevo es una línea más.
@@ -304,6 +308,12 @@ export function tickMarket(state) {
       const newPrice = m.prices[cid][pid] * (1 + gap * MARKET.responsiveness + noise);
       m.prices[cid][pid] = Math.max(MARKET.absoluteMinPrice, newPrice);
       m.history[cid][pid].push(m.prices[cid][pid]);
+
+      // Stash las componentes del gap para que el snapshot (y la UI) las puedan
+      // mostrar sin recomputarlas. Es debug data — un objeto por (cid, pid).
+      m.lastPriceComponents = m.lastPriceComponents || {};
+      m.lastPriceComponents[cid] = m.lastPriceComponents[cid] || {};
+      m.lastPriceComponents[cid][pid] = { flowGap, stockGap, alpha, gap };
     }
   }
 
@@ -314,7 +324,7 @@ export function tickMarket(state) {
   // charts. price, marketStock y priceIndex se leen del state actual (ya
   // settled). supplyDay y consumptionDay se pasan como override desde los
   // counters que capturamos antes de la rotación — sin eso quedarían en 0.
-  recordMarketSnapshot(state, prevSupplyToday, prevConsumptionDay);
+  recordMarketSnapshot(state, prevSupplyToday, prevConsumptionDay, prevDemandIntentDay, prevSupplyIntentDay);
 
   // Reset supplyToday for the next day's external producers to push into.
   for (const cid of COUNTRY_IDS) state.countries[cid].supplyToday = {};

@@ -27,10 +27,16 @@ export function initMarketSnapshot(state) {
   }
 }
 
-// Acepta overrides opcionales para supply/consumption — tickMarket captura
-// estos counters ANTES de rotarlos y los pasa acá. Sin eso, supplyDay y
-// consumptionDay quedarían en 0 (la rotación los borra antes del snapshot).
-export function recordMarketSnapshot(state, supplyOverride = null, consumptionOverride = null) {
+// Acepta overrides opcionales para supply/consumption/demandIntent/supplyIntent
+// — tickMarket captura estos counters ANTES de rotarlos y los pasa acá. Sin eso,
+// los _Day quedarían en 0 (la rotación los borra antes del snapshot).
+export function recordMarketSnapshot(
+  state,
+  supplyOverride = null,
+  consumptionOverride = null,
+  demandIntentOverride = null,
+  supplyIntentOverride = null,
+) {
   if (!state.market.snapshot) initMarketSnapshot(state);
   const day = state.time.totalDays;
   for (const cid of COUNTRY_IDS) {
@@ -39,8 +45,12 @@ export function recordMarketSnapshot(state, supplyOverride = null, consumptionOv
     const series = state.market.snapshot[cid];
     const supplySrc = supplyOverride?.[cid] ?? c.supplyToday;
     const consSrc = consumptionOverride?.[cid] ?? c.consumptionDay;
+    const demSrc = demandIntentOverride?.[cid] ?? c.demandIntentToday;
+    const supIntSrc = supplyIntentOverride?.[cid] ?? c.supplyIntentToday;
+    const components = state.market.lastPriceComponents?.[cid] ?? {};
     for (const pid of PRODUCIBLE_IDS) {
       const price = state.market.prices?.[cid]?.[pid] ?? 0;
+      const comp = components[pid] || {};
       series[pid].push({
         day,
         price: Math.round(price * 100) / 100,
@@ -49,6 +59,12 @@ export function recordMarketSnapshot(state, supplyOverride = null, consumptionOv
         offMarketStock: Math.round(offMarketInventoryFor(state, cid, pid)),
         supplyDay: Math.round(supplySrc?.[pid] ?? 0),
         consumptionDay: Math.round(consSrc?.[pid] ?? 0),
+        demandIntentDay: Math.round(demSrc?.[pid] ?? 0),
+        supplyIntentDay: Math.round(supIntSrc?.[pid] ?? 0),
+        flowGap:  Math.round((comp.flowGap  ?? 0) * 1000) / 1000,
+        stockGap: Math.round((comp.stockGap ?? 0) * 1000) / 1000,
+        alpha:    Math.round((comp.alpha    ?? 0) * 1000) / 1000,
+        gap:      Math.round((comp.gap      ?? 0) * 1000) / 1000,
         priceIndex: Math.round((c.priceIndex ?? 1) * 1000) / 1000,
         wageRate: Math.round(c.wageRate ?? 0),
       });

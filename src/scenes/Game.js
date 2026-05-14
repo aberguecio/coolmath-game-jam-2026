@@ -2082,19 +2082,38 @@ export class Game extends Phaser.Scene {
         const pct = tot > 0 ? Math.round((mk / tot) * 100) : 0;
         return { line: `Market ${mk}u   ·   Off-market ${off}u   ·   In-góndola ${pct}%   ·   ${smp.length}d` };
       };
-    } else { // flows
+    } else if (mode === 'flows') {
+      // 4 series: pares intent (sólida) vs realizado (fina, mismo color base).
+      // La separación visual entre sólida y fina es la demanda no servida
+      // (stockouts) o la oferta no absorbida (sin buyers).
       samplesRaw = (s.market.snapshot?.[cid]?.[pid] || []).slice();
       series = [
-        { key: 'supplyDay',      label: 'Supply',      color: 0x60b3ff },
-        { key: 'consumptionDay', label: 'Consumption', color: 0xff6b6b },
+        { key: 'supplyIntentDay', label: 'Supply intent',  color: 0x60b3ff, width: 2 },
+        { key: 'supplyDay',       label: 'Supply real',    color: 0x60b3ff, width: 1 },
+        { key: 'demandIntentDay', label: 'Demand intent',  color: 0xff6b6b, width: 2 },
+        { key: 'consumptionDay',  label: 'Consumption',    color: 0xff6b6b, width: 1 },
       ];
       yUnit = 'u'; titleIcon = '📉';
       statsFn = (smp) => {
         const last30 = smp.slice(-30);
-        const sumSup = last30.reduce((a, r) => a + (r.supplyDay || 0), 0);
-        const sumCons = last30.reduce((a, r) => a + (r.consumptionDay || 0), 0);
-        const net = sumSup - sumCons;
-        return { line: `30d supply ${sumSup}u   ·   30d consumption ${sumCons}u   ·   Net ${net >= 0 ? '+' : ''}${net}u   ·   ${smp.length}d` };
+        const sumDI = last30.reduce((a, r) => a + (r.demandIntentDay || 0), 0);
+        const sumC  = last30.reduce((a, r) => a + (r.consumptionDay   || 0), 0);
+        const sumSI = last30.reduce((a, r) => a + (r.supplyIntentDay  || 0), 0);
+        const sumS  = last30.reduce((a, r) => a + (r.supplyDay        || 0), 0);
+        const unmet = sumDI - sumC;
+        return { line: `30d demand ${sumDI}u (unmet ${unmet}u)   ·   30d supply ${sumSI}u (sold ${sumS}u)   ·   ${smp.length}d` };
+      };
+    } else { // pressure — gap breakdown
+      samplesRaw = (s.market.snapshot?.[cid]?.[pid] || []).slice();
+      series = [
+        { key: 'flowGap',  label: 'flowGap',  color: 0x6ee79a, width: 2 },
+        { key: 'stockGap', label: 'stockGap', color: 0x60b3ff, width: 2 },
+        { key: 'gap',      label: 'gap (combo)', color: 0xffd166, width: 2 },
+      ];
+      yUnit = ''; titleIcon = '🎯';
+      statsFn = (smp) => {
+        const lr = smp[smp.length - 1];
+        return { line: `α=${(lr.alpha||0).toFixed(2)}   ·   flowGap=${(lr.flowGap||0).toFixed(2)}   ·   stockGap=${(lr.stockGap||0).toFixed(2)}   ·   gap=${(lr.gap||0).toFixed(2)}   ·   Δprice/día ≈ ${((lr.gap||0)*100).toFixed(2)}%` };
       };
     }
 
@@ -2105,9 +2124,10 @@ export class Game extends Phaser.Scene {
     // ---- Mode toggle (3 botones) + Date pills en la misma fila ----
     const toggleY = contentTop;
     const modes = [
-      { id: 'price',  label: 'Price'  },
-      { id: 'stocks', label: 'Stocks' },
-      { id: 'flows',  label: 'Flows'  },
+      { id: 'price',    label: 'Price'    },
+      { id: 'stocks',   label: 'Stocks'   },
+      { id: 'flows',    label: 'Flows'    },
+      { id: 'pressure', label: 'Pressure' },
     ];
     let tgX = x + 18;
     for (const m of modes) {
@@ -2209,7 +2229,9 @@ export class Game extends Phaser.Scene {
     if (maxV === minV) maxV = minV + 1;
     const range = maxV - minV;
     const yPad = range * 0.08;
-    const yMin = Math.max(0, minV - yPad);
+    // Mode pressure permite negativos (gap ∈ [−1, +1]); los demás modos
+    // arrancan en 0 (precio, unidades) y se clampean.
+    const yMin = mode === 'pressure' ? (minV - yPad) : Math.max(0, minV - yPad);
     const yMax = maxV + yPad;
     const yRange = (yMax - yMin) || 1;
 
@@ -2219,7 +2241,10 @@ export class Game extends Phaser.Scene {
       const py = plotBottom - ((yVal - yMin) / yRange) * plotH;
       this.priceChartGfx.lineStyle(1, 0x3a4d63, 0.5);
       this.priceChartGfx.lineBetween(plotLeft, py, plotRight, py);
-      const labText = yUnit === '$' ? `$${yVal.toFixed(0)}` : `${Math.round(yVal)}u`;
+      const labText = yUnit === '$' ? `$${yVal.toFixed(0)}`
+                    : yUnit === 'u' ? `${Math.round(yVal)}u`
+                    : yVal.toFixed(2);   // pressure mode: gap puro
+
       const lab = this.add.text(plotLeft - 6, py, labText, {
         fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
       }).setOrigin(1, 0.5).setDepth(63);
@@ -2245,6 +2270,15 @@ export class Game extends Phaser.Scene {
     this.priceChartFrame.group.add(xStartLab); this.priceChartFrame.group.add(xEndLab);
     this.priceChartDynamic.push(xStartLab, xEndLab);
 
+    // Pressure mode: línea de referencia y=0 (neutral) si el rango la cruza
+    if (mode === 'pressure' && yMin < 0 && yMax > 0) {
+      const zy = plotBottom - ((0 - yMin) / yRange) * plotH;
+      this.priceChartGfx.lineStyle(1, 0x566370, 0.6);
+      for (let dx = 0; dx < plotW; dx += 6) {
+        this.priceChartGfx.lineBetween(plotLeft + dx, zy, plotLeft + dx + 3, zy);
+      }
+    }
+
     // basePrice dashed reference (sólo modo price)
     if (mode === 'price') {
       const base = def.market?.basePrice ?? 0;
@@ -2265,7 +2299,7 @@ export class Game extends Phaser.Scene {
     let legendX = plotRight - 10;
     for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
       const ser = series[sIdx];
-      this.priceChartGfx.lineStyle(2, ser.color, 1);
+      this.priceChartGfx.lineStyle(ser.width ?? 2, ser.color, 1);
       this.priceChartGfx.beginPath();
       for (let i = 0; i < samples.length; i++) {
         const px = plotLeft + (i / (samples.length - 1)) * plotW;
