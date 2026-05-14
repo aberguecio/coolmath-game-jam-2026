@@ -6,7 +6,7 @@ import { initMarketSnapshot } from '../systems/MarketHistory.js';
 import { generateMineralDeposits } from '../systems/Mining.js';
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID, COUNTRIES } from '../data/countries.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
-import { INDUSTRIES, INDUSTRY_IDS } from '../data/industries.js';
+import { INDUSTRIES } from '../data/industries.js';
 import { TAX_RATES } from '../data/taxRates.js';
 import { DISTANCES } from '../data/distances.js';
 
@@ -35,10 +35,6 @@ function validateRegistries() {
     for (const other of COUNTRY_IDS) {
       if (DISTANCES[cid][other] == null) throw new Error(`distances.${cid}.${other} missing`);
       if (DISTANCES[cid][other] !== DISTANCES[other][cid]) throw new Error(`distances asymmetric: ${cid}↔${other}`);
-    }
-    // Seeded industries must reference a real industry id.
-    for (const indId of reg.seededIndustries || []) {
-      if (!INDUSTRIES[indId]) throw new Error(`Country ${cid} seededIndustries references "${indId}" missing in industries.js`);
     }
   }
 }

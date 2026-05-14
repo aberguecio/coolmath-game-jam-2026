@@ -165,9 +165,19 @@ export function initMarket(state) {
     }
   }
   recomputeTargetStocks(state);
+  // Inventory inicial: SOLO para crops (agricultura es la única producción
+  // activa al día 0). Mineras e industrias parten sin stock — sus mercados
+  // arrancan vacíos y se llenan cuando alguien construye una mina/fábrica
+  // y empieza a vender. Esto da una transición limpia desde "economía agraria"
+  // hacia industrialización.
   for (const cid of COUNTRY_IDS) {
     for (const pid of PRODUCIBLE_IDS) {
-      m.inventory[cid][pid] = state.market.targetStock[cid][pid] ?? 50;
+      const def = PRODUCIBLES[pid];
+      // Solo crops (annual + perennial fruit/tree) arrancan con stock. Mining
+      // y processed (industriales) parten en 0 — sus mercados se llenan cuando
+      // alguien construye minas/fábricas y empieza a vender.
+      const isCrop = def?.category === 'annual_crop' || def?.category === 'perennial_crop';
+      m.inventory[cid][pid] = isCrop ? (state.market.targetStock[cid][pid] ?? 50) : 0;
     }
   }
 }

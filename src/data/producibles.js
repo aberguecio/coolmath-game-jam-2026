@@ -170,44 +170,20 @@ export const PRODUCIBLES = {
     market: { basePrice: 120 },
   },
 
-  juice: {
-    id: 'juice', name: 'Apple Juice', color: 0xff8a4a,
-    category: 'processed',
-    commodityType: 'food', processStage: 'processed',
-    nutritionUnits: 0.6,
-    market: { basePrice: 200 },
-  },
-
-  jewelry: {
-    id: 'jewelry', name: 'Jewelry', color: 0xffe066,
-    category: 'processed',
-    commodityType: 'material', processStage: 'final',
-    nutritionUnits: 0,
-    market: { basePrice: 1200 },
-  },
-
-  steel: {
-    id: 'steel', name: 'Steel', color: 0x9da0a6,
+  mechanicalPart: {
+    id: 'mechanicalPart', name: 'Mechanical Part', color: 0x9da0a6,
     category: 'processed',
     commodityType: 'material', processStage: 'processed',
     nutritionUnits: 0,
     market: { basePrice: 220 },
   },
 
-  cable: {
-    id: 'cable', name: 'Cable', color: 0xb86a3a,
+  electricalPart: {
+    id: 'electricalPart', name: 'Electrical Part', color: 0xb86a3a,
     category: 'processed',
     commodityType: 'material', processStage: 'processed',
     nutritionUnits: 0,
     market: { basePrice: 380 },
-  },
-
-  pie: {
-    id: 'pie', name: 'Cherry Pie', color: 0xd14b8a,
-    category: 'processed',
-    commodityType: 'food', processStage: 'final',
-    nutritionUnits: 1.4,
-    market: { basePrice: 280 },
   },
 };
 
