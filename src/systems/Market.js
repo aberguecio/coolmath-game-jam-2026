@@ -510,14 +510,58 @@ export function writeOffToMarket(state, ownerId, producibleId, units, countryId,
 }
 
 // =============================================================================
-// Yearly tick — population growth scales consumption per country
+// Yearly tick — population growth driven by nutrition acquired
 // =============================================================================
+// Reglas (en lenguaje humano):
+//  - Si en promedio la población consigue al menos la nutrición de "vivir bien"
+//    (pop × NUTRITION_PER_CAPITA × WELL_BEING_FACTOR), CRECE al ritmo base
+//    (reg.populationGrowth, p. ej. 1%/año).
+//  - Si consigue al menos la "supervivencia" (pop × NUTRITION_PER_CAPITA) pero
+//    no llega al "vivir bien", se MANTIENE (interpola linealmente entre cero y
+//    crecimiento base según qué tan cerca está del wellbeing).
+//  - Si NI siquiera llega a supervivencia, DECRECE proporcional al déficit
+//    (hasta -5% / año en hambruna total).
+//
+// La nutrición consumida se calcula desde el consumptionHistory de los últimos
+// 90 días (sumando units × nutritionUnits de cada food). Es un proxy razonable
+// del estado nutricional al cierre del año.
 export function tickCountriesYearly(state) {
   for (const cid of COUNTRY_IDS) {
     const reg = COUNTRIES[cid];
     const c = state.countries[cid];
+
+    // Promedio diario de nutrición consumida en los últimos 90 días
+    let nutritionDailyAvg = 0;
+    for (const pid of PRODUCIBLE_IDS) {
+      const def = PRODUCIBLES[pid];
+      const nutri = def?.nutritionUnits || 0;
+      if (nutri <= 0) continue;
+      const hist = c.consumptionHistory?.[pid] || [];
+      const sum = hist.reduce((s, x) => s + x, 0);
+      nutritionDailyAvg += (sum / Math.max(1, hist.length)) * nutri;
+    }
+
+    const survivalDaily = c.population * WAGES.nutritionPerCapita;
+    const wellBeingDaily = survivalDaily * WAGES.wellBeingFactor;
+    const baseGrowth = reg.populationGrowth ?? 0.01;
+
+    let growthRate;
+    if (nutritionDailyAvg >= wellBeingDaily) {
+      // Sobran calorías → crecimiento pleno
+      growthRate = baseGrowth;
+    } else if (nutritionDailyAvg >= survivalDaily) {
+      // Entre supervivencia y vivir-bien → interpolación lineal a cero
+      const span = wellBeingDaily - survivalDaily;
+      const headroom = nutritionDailyAvg - survivalDaily;
+      growthRate = baseGrowth * (span > 0 ? headroom / span : 0);
+    } else {
+      // Hambruna → decrecimiento proporcional al déficit (hasta -5%/año)
+      const deficitRatio = survivalDaily > 0 ? nutritionDailyAvg / survivalDaily : 1;
+      growthRate = -0.05 * (1 - deficitRatio);
+    }
+
     const noise = (Math.random() * 2 - 1) * 0.005;
-    c.population *= (1 + (reg.populationGrowth ?? 0) + noise);
+    c.population = Math.max(1, c.population * (1 + growthRate + noise));
     const popRatio = c.population / reg.population;
     for (const pid of PRODUCIBLE_IDS) {
       c.consumption[pid] = (reg.consumption[pid] || 0) * popRatio;
