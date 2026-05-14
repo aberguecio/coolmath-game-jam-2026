@@ -1,8 +1,10 @@
 # Reglas económicas de la simulación
 
-Este documento describe **cómo funciona la economía del juego en lenguaje humano**, sin código. Es la "constitución" del mundo: qué decide cada actor, qué desencadena qué, y por qué los precios suben o bajan.
-
-Si lees el código y dudas, este doc es la referencia de "intención de diseño". Si el código contradice este doc, hay un bug.
+> **Este documento es de REGLAS económicas, no de código.** Describe el COMPORTAMIENTO del sistema en lenguaje humano: qué decide cada actor, qué desencadena qué, y por qué los precios suben o bajan. No hay extractos de código a propósito — la idea es que cualquiera (diseñador, programador, tester) pueda entender la economía sin abrir un solo archivo `.js`.
+>
+> Si lees el código y dudas, este doc es la referencia de "intención de diseño". Si el código contradice este doc, hay un bug — o bien hay que actualizar el doc, o bien arreglar el código.
+>
+> **Hay un hook configurado** (`.claude/settings.json`) que, después de cualquier edición de archivos en `src/systems/` o `src/data/`, le recuerda a Claude evaluar si ese cambio afecta reglas económicas documentadas acá y actualizar este archivo si corresponde.
 
 ---
 
@@ -117,6 +119,29 @@ Después la población **reparte su budget proporcionalmente al score**. Si trig
 
 Esto produce **sustitución natural**: si trigo se pone carísimo, su score baja, la población migra a comprar más manzana y papa automáticamente. No hay reglas explícitas de diversidad — emerge del balance.
 
+### 3.7 ¿Cómo crece o decrece la población?
+
+El crecimiento poblacional se calcula **una vez al año** y depende del consumo real de nutrición observado en los últimos 90 días. La población es testigo objetivo de su propio bienestar.
+
+Cada persona tiene dos umbrales:
+- **Supervivencia**: cada habitante necesita al menos `nutritionPerCapita` unidades de nutrición por día (hoy 0.1).
+- **Vivir bien**: con un 20% extra encima de supervivencia, la gente está cómoda.
+
+El motor mira el promedio diario de nutrición que la población efectivamente compró y la compara contra esos dos umbrales:
+
+| Estado | Condición | Efecto en la población |
+|---|---|---|
+| **Sobrada** | nutrición consumida ≥ pop × 0.12 (well-being) | Crece al ritmo base del país (~1%/año) |
+| **Justa** | entre survival (0.10) y well-being (0.12) | Crece interpolando linealmente entre 0% y el ritmo base |
+| **Hambruna parcial** | menor a survival pero > 0 | Decrece proporcional al déficit (hasta −5%/año en hambruna total) |
+| **Cero comida** | nutrición = 0 | Decrece al máximo (−5%/año) |
+
+Se suma un ruido aleatorio chico (±0.5%) por encima del rate calculado, así no es perfectamente determinístico. La población **nunca cae bajo 1 habitante** — el motor preserva al menos uno aunque la hambruna sea brutal (evita división por cero en otros cálculos).
+
+Cuando la población cambia, las `consumption` baseline del país se reescalan proporcionalmente — más gente come más, menos gente come menos. Esto afecta tanto al target dinámico (sección 6.2) como a los pesos del basket de priceIndex.
+
+**Implicancia económica**: este loop convierte la oferta agraria en una restricción dura del crecimiento. Si una región nunca consigue alimentar a sus 1000 habitantes, el equilibrio natural es que la población caiga hasta lo que la agricultura local + importaciones puedan sostener. Es señal sin caps — un país con economía agraria fuerte crece, uno con economía pobre se vacía.
+
 ---
 
 ## 4. Los AI farmers — cómo deciden producir
@@ -166,6 +191,20 @@ Los tiles de AI farmer arrancan con `autoMode = true` por seed, así el ciclo co
 ### 4.6 ¿Cuándo cierran/uprooten un cultivo perennial?
 
 Si un perennial es "skipeado" (no cosechado por baja rentabilidad) o se cosecha a pérdida varios ciclos seguidos, el AI lo uproot (limpia el árbol) para liberar el tile a algo más rentable.
+
+### 4.7 ¿Cómo deciden vender lo que tienen en inventario?
+
+Una vez cosechado, el output no se vende de golpe. Cada día, el AI farmer evalúa cada producto que tiene en stock y decide qué porcentaje sacar a la venta. **El rate de venta es dinámico** y combina dos señales independientes:
+
+- **Señal de precio** (¿es buen momento para vender?): compara el precio actual contra el promedio móvil de 60 días. Si está alto vs su histórico, es oportunidad — vende más. Si está bajo, vende menos pero algo (mantener cash flow). El multiplicador queda acotado entre 0.2× (precio muy bajo) y 2.5× (boom).
+- **Señal de stock** (¿cuánto me está pesando el inventario?): mide el stock acumulado vs el "cap" del país (que es `consumption × inventoryCapDays`). Cuando el stock supera el 50% del cap, la presión empieza a acelerar la venta. Sin tope: más acumulado = más urgencia (porque el storage cost mensual come la rentabilidad).
+
+El rate efectivo es **rate_base × multiplicador_precio × presión_stock**. Por ejemplo, si la base es 15% mensual:
+- Precio en línea con MA, stock al 50% del cap → 15% × 1.0 × 1.0 = **15%/intento** (neutral).
+- Precio 1.5× MA, stock 80% del cap → 15% × 1.5 × 1.3 = **29%/intento** (vendiendo rápido).
+- Precio 0.3× MA, stock bajo → 15% × 0.3 × 1.0 = **4.5%/intento** (hoardea esperando recuperación).
+
+**Override de seguridad**: si el stock supera el cap absoluto, se descarga el exceso sin importar el precio (fire-sale). Esto evita acumulación infinita cuando los precios nunca se recuperan.
 
 ---
 
@@ -429,7 +468,7 @@ Para tener clara la "frecuencia con que pasan las cosas":
   - State machine de crisis fiscal.
   - AI evalúa cerrar/reabrir industrias y top-up de inputs.
 - **Anual**:
-  - Crecimiento poblacional (cada país aumenta su población según `populationGrowth`).
+  - Crecimiento poblacional (depende de la nutrición — ver sección 3.7).
   - Consumption baselines se reescalan con la nueva población.
   - Ciudad crece (aumenta su radio, más tiles entran al halo).
 
