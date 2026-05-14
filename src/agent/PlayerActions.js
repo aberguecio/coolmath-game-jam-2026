@@ -22,7 +22,6 @@ import {
 } from '../systems/Farming.js';
 import { applyForLoan } from '../systems/Bank.js';
 import { sellFromInventory, buyFromGlobal } from '../systems/Market.js';
-import { exporterStartShipment } from '../systems/Exporters.js';
 
 // =============================================================================
 // Tile lifecycle
@@ -88,16 +87,6 @@ export function actTakeLoan(state, { productId, amount }) {
 }
 
 // =============================================================================
-// Exporting
-// =============================================================================
-export function actStartShipment(state, { exporterId, plan }) {
-  const exp = state.exporters?.find(e => e.id === exporterId);
-  if (!exp) return { ok: false, reason: 'exporter not found' };
-  if (exp.ownerId !== 'player') return { ok: false, reason: 'not your exporter' };
-  return exporterStartShipment(state, exp, plan);
-}
-
-// =============================================================================
 // No-op (bot decides not to act this tick)
 // =============================================================================
 export function actNoop() {
@@ -121,7 +110,6 @@ export const ACTION_REGISTRY = {
   sellInventory: actSellInventory,
   buyFromMarket: actBuyFromMarket,
   takeLoan: actTakeLoan,
-  startShipment: actStartShipment,
 };
 
 export function apply(state, action) {

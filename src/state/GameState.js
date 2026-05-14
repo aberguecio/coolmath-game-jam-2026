@@ -195,18 +195,16 @@ export function createInitialState() {
     selection: { tileId: null, countryId: PLAYER_COUNTRY_ID },
     log: [{ day: 0, text: 'Welcome. You own 1 plot in Home and $0. Visit the bank.' }],
     aiFarmers: [],
-    exporters: [],
     // Centralised wallet registry — id → wallet object. Lets Transactions.js
     // resolve any owner type via a single lookup instead of a hardcoded chain
-    // (aiFarmers ?? exporters ?? banks…). Pattern: any actor with a `cash`
-    // field registers here at creation, deregisters on destruction.
+    // (aiFarmers ?? banks…). Pattern: any actor with a `cash` field registers
+    // here at creation, deregisters on destruction.
     wallets: {},
     activeEvents: [],
     eventHistory: [],
     fxQueue: [],
     ledger: [],                        // ring of recent transactions for debug/audit (last 200)
     aiDecisionLog: [],                 // ring of recent AI build/close decisions
-    tradeFlows: [],                    // {day, src, dst, pid, units} — last ~60 days, used by World view
     tutorial: loadTutorialState(),
     ui: {
       bankOpen: false,
@@ -344,8 +342,6 @@ export function resolveActorName(state, actorId) {
   if (actorId === 'population' || actorId === 'treasury' || actorId === 'foreign') return actorId;
   const ai = state.aiFarmers?.find(a => a.id === actorId);
   if (ai) return ai.name;
-  const exp = state.exporters?.find(e => e.id === actorId);
-  if (exp) return exp.name;
   return actorId;
 }
 

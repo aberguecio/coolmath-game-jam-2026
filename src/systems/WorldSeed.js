@@ -1,11 +1,9 @@
 // WorldSeed — generates day-zero starter production. Cada país arranca con
-// agricultura activa (1 tile por crop, AI farmers round-robin) y exporters
-// listos para tradear. Idempotente contra HMR / re-init.
+// agricultura activa (1 tile por crop, AI farmers round-robin). Idempotente
+// contra HMR / re-init.
 
 import { PRODUCIBLES } from '../data/producibles.js';
 import { COUNTRY_IDS } from '../data/countries.js';
-import { EXPORTERS } from '../data/tunables.js';
-import { seedExportersFor } from './Exporters.js';
 
 function pickWildTileNot(map, predicate) {
   for (const t of map.tiles) {
@@ -58,9 +56,6 @@ function seedStarterProduction(state) {
     // === 2. Industrias seeded — DESACTIVADO ===
     // El juego ya no arranca con factorías operacionales. Las industrias deben
     // construirse durante el juego (AI vía aiTryBuildIndustry, player vía UI).
-
-    // === 3. Seed AI exporters for this town (Sprint C) ===
-    seedExportersFor(state, cid, EXPORTERS.perTownCount);
   }
 }
 

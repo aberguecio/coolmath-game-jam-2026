@@ -26,8 +26,8 @@ export function walletOf(state, ownerId) {
   if (ownerId === 'population' || ownerId === 'treasury') return null;
   if (ownerId === 'foreign') return null;
   // Registry lookup — any actor type that registered itself in state.wallets
-  // (AI farmers, exporters, future actors) is reachable through this single
-  // call. Falls back to aiFarmers scan for any legacy caller that pre-dates
+  // (AI farmers, future actors) is reachable through this single call.
+  // Falls back to aiFarmers scan for any legacy caller that pre-dates
   // the registry init.
   return state.wallets?.[ownerId]
     ?? state.aiFarmers?.find(a => a.id === ownerId)

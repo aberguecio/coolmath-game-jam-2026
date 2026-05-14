@@ -73,10 +73,7 @@ export function populationSpend(state) {
       });
       if (!r.ok) continue;
       m.inventory[cid][cand.pid] -= buyUnits;
-      // Registrar como consumo local — la población siempre es local por design.
-      // Pasa por recordConsumption (mismo helper que buyFromGlobal) → mantiene
-      // el invariante consumptionHistory === consumptionLocalHistory + consumptionExportHistory.
-      recordConsumption(c, cand.pid, buyUnits, /* isExport */ false);
+      recordConsumption(c, cand.pid, buyUnits);
       nutritionAcquired += buyUnits * cand.nutrition;
       budget -= (r.grossRevenue + r.taxPaid);
     }

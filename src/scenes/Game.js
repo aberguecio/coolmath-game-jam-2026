@@ -14,7 +14,7 @@ import {
   tickMarket, priceTrend, tickCountriesYearly,
   sellFromInventory, buyFromGlobal, inventoryOf,
   elasticityFor, elasticityTargetFor,
-  populationSpend, marketInventoryOf, tradeFlowVolume,
+  populationSpend, marketInventoryOf,
   offMarketInventoryFor,
 } from '../systems/Market.js';
 import { tickFiscalCrisis } from '../systems/FiscalCrisis.js';
@@ -30,9 +30,7 @@ import {
 } from '../systems/Inflation.js';
 import { tickLaborMarket, wageRateFor } from '../systems/Labor.js';
 import { tickStorageCost, storageBillFor } from '../systems/Storage.js';
-import { tickExporters } from '../systems/Exporters.js';
-import { aiExporterTryShipment } from '../systems/ExporterAI.js';
-import { EXPORTERS, OFFERS } from '../data/tunables.js';
+import { OFFERS } from '../data/tunables.js';
 import {
   acceptOffer, rejectOffer, counterOffer, makePurchaseOffer,
   buyStartingAmount, buyAcceptProbability, counterAcceptProbability,
@@ -128,7 +126,6 @@ export class Game extends Phaser.Scene {
     this.buildStockChartModal();
     this.buildEventsModal();
     this.buildCompaniesModal();
-    this.buildExportersModal();
     this.buildWorldModal();
     this.buildTutorialOverlay();
     this.offerMarkers = [];
@@ -156,7 +153,6 @@ export class Game extends Phaser.Scene {
       if (this.state.ui.marketOpen) { this.toggleMarket(false); return; }
       if (this.state.ui.eventsOpen) { this.toggleEvents(false); return; }
       if (this.state.ui.companiesOpen) { this.toggleCompanies(false); return; }
-      if (this.state.ui.exportersOpen) { this.toggleExporters(false); return; }
       if (this.state.ui.worldOpen) { this.toggleWorld(false); return; }
       if (this.state.ui.countryChartOpen) { this.closeCountryChart(); return; }
       if (this.state.ui.bankOpen) { this.toggleBank(false); return; }
@@ -418,11 +414,6 @@ export class Game extends Phaser.Scene {
     const companiesX = place(ICON_W);
     this.companiesBtn = this.makeIconButton(companiesX, ICON_W, '🏭', 0xc792ea, 0xd9b3f0,
       () => this.toggleCompanies(true), 'Companies');
-
-    // EXPORTERS
-    const exportersX = place(ICON_W);
-    this.exportersBtn = this.makeIconButton(exportersX, ICON_W, '🚢', 0x88c8ff, 0xa8d8ff,
-      () => this.toggleExporters(true), 'Exporters');
 
     // AUTOPLAY — clickable toggle (off → BOT → CLAUDE → off)
     const autoX = place(ICON_W);
@@ -1199,7 +1190,7 @@ export class Game extends Phaser.Scene {
       'Money flows in from:\n' +
       '• Sale tax (population buying)\n' +
       '• B2B tax (company-to-company purchases)\n' +
-      '• Import tax (exporters selling from abroad)\n\n' +
+      '• Import tax (cross-country purchases)\n\n' +
       'Money flows out to:\n' +
       '• Welfare top-up to wageFund when needed\n' +
       '• Subsidies during fiscal crisis\n\n' +
@@ -1210,11 +1201,10 @@ export class Game extends Phaser.Scene {
       'MARKET POOL\n\n' +
       'Cash pool of the town\'s wholesale market. Acts as the invisible middleman between producers and consumers.\n\n' +
       'Money flows in from:\n' +
-      '• Population buying from market\n' +
-      '• Exporters unloading cargo here\n\n' +
+      '• Population buying from market\n\n' +
       'Money flows out to:\n' +
-      '• Player / AI / exporters selling into market\n\n' +
-      'If it dries up: sales into this pool fail. Exporters either fire-sale or dump cargo for free when the pool hits 0.');
+      '• Player / AI selling into market\n\n' +
+      'If it dries up: sales into this pool fail.');
 
     rowWithInfo(colB, infoTop + lineH * 4,
       `priceIndex: ${pi} (${piSign}${piPct}%)`, Math.abs(piPct) > 30 ? '#ff8c8c' : '#cdd6df',
@@ -1330,7 +1320,6 @@ export class Game extends Phaser.Scene {
     // ============================================================
     const headerY = marketTop;
     ls(colA, headerY, '── SUPPLY vs DEMAND ──', '#7a8694', '10px');
-    ls(x + w - 280, headerY, '🟢 local prod ░ import   🔴 local cons ░ export', '#566370', '8px');
 
     const rowsTop = marketTop + 16;
     const rowH = 36;
@@ -1342,21 +1331,15 @@ export class Game extends Phaser.Scene {
     const barAreaX = x + 20 + labelW;
     const barAreaW = w - 40 - labelW - valueW;
 
-    // Pre-compute las 4 agregaciones — el invariante garantiza que
-    // sLocal + sImport === supply total y dLocal + dExport === demand total.
     const rowsAgg = rows.map(def => {
-      const sLocal  = aggSum(run.supplyLocalHistory?.[def.id]);
-      const sImport = aggSum(run.supplyImportHistory?.[def.id]);
-      const dLocal  = aggSum(run.consumptionLocalHistory?.[def.id]);
-      const dExport = aggSum(run.consumptionExportHistory?.[def.id]);
-      return { def, sLocal, sImport, dLocal, dExport };
+      const supply = aggSum(run.supplyHistory?.[def.id]);
+      const demand = aggSum(run.consumptionHistory?.[def.id]);
+      return { def, supply, demand };
     });
     let maxFlow = 1;
     for (const r of rowsAgg) {
-      const s = r.sLocal + r.sImport;
-      const d = r.dLocal + r.dExport;
-      if (s > maxFlow) maxFlow = s;
-      if (d > maxFlow) maxFlow = d;
+      if (r.supply > maxFlow) maxFlow = r.supply;
+      if (r.demand > maxFlow) maxFlow = r.demand;
     }
 
     rowsAgg.forEach((agg, i) => {
@@ -1370,30 +1353,20 @@ export class Game extends Phaser.Scene {
       }).setOrigin(0, 0.5).setDepth(57);
       this.chartGroup.add(nameTxt); this.chartLabels.push(nameTxt);
 
-      // Stacked bars: solid base color para la parte local, shade más oscuro
-      // contiguo para la parte cross-country (import en supply, export en demand).
       const barH = 9;
-      const sLocalLen = (agg.sLocal / maxFlow) * barAreaW;
-      const sImpLen   = (agg.sImport / maxFlow) * barAreaW;
-      const dLocalLen = (agg.dLocal / maxFlow) * barAreaW;
-      const dExpLen   = (agg.dExport / maxFlow) * barAreaW;
+      const sLen = (agg.supply / maxFlow) * barAreaW;
+      const dLen = (agg.demand / maxFlow) * barAreaW;
       // Supply bar (arriba)
-      this.chartGfx.fillStyle(0x6ee79a, 0.9);  // verde local
-      this.chartGfx.fillRect(barAreaX, midY - barH - 1, sLocalLen, barH);
-      this.chartGfx.fillStyle(0x3a7a55, 0.9);  // verde tenue import
-      this.chartGfx.fillRect(barAreaX + sLocalLen, midY - barH - 1, sImpLen, barH);
+      this.chartGfx.fillStyle(0x6ee79a, 0.9);
+      this.chartGfx.fillRect(barAreaX, midY - barH - 1, sLen, barH);
       // Demand bar (abajo)
-      this.chartGfx.fillStyle(0xff6b6b, 0.9);  // rojo local
-      this.chartGfx.fillRect(barAreaX, midY + 1, dLocalLen, barH);
-      this.chartGfx.fillStyle(0x7a3a3a, 0.9);  // rojo tenue export
-      this.chartGfx.fillRect(barAreaX + dLocalLen, midY + 1, dExpLen, barH);
+      this.chartGfx.fillStyle(0xff6b6b, 0.9);
+      this.chartGfx.fillRect(barAreaX, midY + 1, dLen, barH);
       // Axis line
       this.chartGfx.lineStyle(1, 0x3a4d63, 0.6);
       this.chartGfx.lineBetween(barAreaX, midY + barH + 2, barAreaX + barAreaW, midY + barH + 2);
 
-      const supply = agg.sLocal + agg.sImport;
-      const demand = agg.dLocal + agg.dExport;
-      const net = supply - demand;
+      const net = agg.supply - agg.demand;
       const netColor = net > 0.5 ? '#8cffaa' : net < -0.5 ? '#ff8c8c' : '#7a8694';
       const netSign = net > 0 ? '+' : '';
       const netTxt = this.add.text(barAreaX + barAreaW + 6, midY,
@@ -1647,7 +1620,6 @@ export class Game extends Phaser.Scene {
     if (this.state.ui.stockChartOpen) this.refreshStockChartModal();
     if (this.state.ui.eventsOpen) this.refreshEventsModal();
     if (this.state.ui.companiesOpen) this.refreshCompaniesModal();
-    if (this.state.ui.exportersOpen) this.refreshExportersModal();
     if (this.state.ui.worldOpen) this.refreshWorldModal();
     this.refreshTutorial();
   }
@@ -1665,14 +1637,6 @@ export class Game extends Phaser.Scene {
       tickMarket(this.state);           // 3: per-country supply/demand + cross-country trade + prices
       populationSpend(this.state);      // 5: country wage funds buy food (via executeTransaction)
       tickAI(this.state);               // 7: AI daily decisions (tickWages welfare baked into populationSpend)
-      // 7b: Exporters — advance in-flight cargos, settle arrivals, and let
-      // AI exporters consider new trips (after settlement so cash is fresh).
-      tickExporters(this.state);
-      for (const exp of this.state.exporters || []) {
-        if (!exp.bankrupt && exp.ownerId !== 'player') {
-          aiExporterTryShipment(this.state, exp);
-        }
-      }
       // Weekly cadence: AI vuelca inventario al market 1×/semana (antes 1×/mes).
       if (this.state.time.totalDays % 7 === 0) tickAIWeekly(this.state);
     }
@@ -1797,10 +1761,10 @@ export class Game extends Phaser.Scene {
     this.refreshTopBar();
   }
 
-  // Off-market stock held in `cid` by AI farmers + exporters (everyone except
-  // the player — that column is rendered separately as "You"). Built on top
-  // of the shared `offMarketInventoryFor` in Market.js to keep one source of
-  // truth: market snapshot CSV and UI count the same wallets.
+  // Off-market stock held in `cid` by AI farmers (everyone except the player —
+  // that column is rendered separately as "You"). Built on top of the shared
+  // `offMarketInventoryFor` in Market.js to keep one source of truth: market
+  // snapshot CSV and UI count the same wallets.
   offMarketInventoryFor(state, cid, pid) {
     const total = offMarketInventoryFor(state, cid, pid);
     const player = state.player?.inventoryByCountry?.[cid]?.[pid] ?? 0;
@@ -1927,7 +1891,7 @@ export class Game extends Phaser.Scene {
       const stock = Math.round(s.market.inventory?.[cid]?.[def.id] || 0);
       const offMkt = this.offMarketInventoryFor(s, cid, def.id);
       // Per-country inventory: player only sees what they hold IN THIS town.
-      // Cross-country movement requires founding an exporter (future feature).
+      // Per-country inventory: player only sees what they hold IN THIS town.
       const yours = Math.round(inventoryOf(s, 'player', def.id, cid));
       const stockTxt = this.add.text(x + 295, midY, `${stock}u`, {
         fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
@@ -2829,121 +2793,6 @@ export class Game extends Phaser.Scene {
   }
 
   // -----------------------------------------------------------------------
-  // EXPORTERS MODAL — every trader, their cash, P&L, and in-flight cargoes
-  // -----------------------------------------------------------------------
-  buildExportersModal() {
-    const frame = this.makeModalFrame({
-      w: 720, h: 500, title: '🚢  EXPORTERS', color: 0x88c8ff,
-      onClose: () => this.toggleExporters(false),
-    });
-    this.exportersFrame = frame;
-    this.exportersDynamicNodes = [];
-    const card = frame.group.list[1];
-    this.bindWheelScroll(card, 'exporters',
-      () => this.computeExportersMaxScroll(),
-      () => this.refreshExportersModal());
-  }
-
-  computeExportersMaxScroll() {
-    const n = (this.state.exporters?.length || 0);
-    const rowH = 90;
-    const visibleH = this.exportersFrame.contentBottom - this.exportersFrame.contentTop - 30;
-    return Math.max(0, n * rowH - visibleH);
-  }
-
-  toggleExporters(open) {
-    const s = this.state;
-    if (open && !s.ui.exportersOpen) this.enterModal();
-    else if (!open && s.ui.exportersOpen) this.exitModal();
-    s.ui.exportersOpen = open;
-    this.exportersFrame.group.setVisible(open);
-    if (open) this.refreshExportersModal();
-    else {
-      for (const n of this.exportersDynamicNodes) n.destroy();
-      this.exportersDynamicNodes = [];
-    }
-    this.refreshTopBar();
-  }
-
-  refreshExportersModal() {
-    const s = this.state;
-    for (const n of this.exportersDynamicNodes) n.destroy();
-    this.exportersDynamicNodes = [];
-
-    const { x, w, contentTop, contentBottom } = this.exportersFrame;
-    const exporters = s.exporters || [];
-
-    const sub = this.add.text(x + 18, contentTop,
-      `${exporters.length} traders · global avg margin ${EXPORTERS.minMarginPct * 100}% threshold`, {
-        fontFamily: 'monospace', fontSize: '11px', color: '#9aa4ad',
-      });
-    this.exportersFrame.group.add(sub); this.exportersDynamicNodes.push(sub);
-
-    if (exporters.length === 0) {
-      const empty = this.add.text(x + w / 2, (contentTop + contentBottom) / 2,
-        'No exporters yet — seeded at world init.', {
-          fontFamily: 'monospace', fontSize: '12px', color: '#566370',
-        }).setOrigin(0.5);
-      this.exportersFrame.group.add(empty); this.exportersDynamicNodes.push(empty);
-      return;
-    }
-
-    const rowsTop = contentTop + 26;
-    const rowH = 90;
-    const scrollY = (this.scrollState?.exporters) || 0;
-
-    exporters.forEach((exp, i) => {
-      const ry = rowsTop + i * rowH - scrollY;
-      if (ry + rowH < rowsTop || ry > contentBottom) return;
-
-      const bgColor = exp.bankrupt ? 0x3a1a1a : 0x1a2434;
-      const bg = this.add.rectangle(x + 14, ry + 2, w - 28, rowH - 4, bgColor)
-        .setOrigin(0, 0).setStrokeStyle(1, exp.bankrupt ? 0xff7a7a : exp.color)
-        .setDepth(57);
-      this.exportersFrame.group.add(bg); this.exportersDynamicNodes.push(bg);
-
-      // Color flag
-      const flag = this.add.rectangle(x + 22, ry + 8, 6, 24, exp.color).setOrigin(0, 0).setDepth(58);
-      this.exportersFrame.group.add(flag); this.exportersDynamicNodes.push(flag);
-
-      // Header
-      const tag = exp.bankrupt ? ' [BANKRUPT]' : '';
-      const head = `${exp.name}${tag}  ·  home ${COUNTRIES[exp.homeCountryId]?.name ?? exp.homeCountryId}`;
-      const headTxt = this.add.text(x + 36, ry + 4, head, {
-        fontFamily: 'monospace', fontSize: '12px',
-        color: exp.bankrupt ? '#ff7a7a' : '#e8edf3', fontStyle: 'bold',
-      }).setDepth(58);
-      this.exportersFrame.group.add(headTxt); this.exportersDynamicNodes.push(headTxt);
-
-      // Stats line
-      const pnlColor = exp.pnl > 0 ? '#8cffaa' : exp.pnl < 0 ? '#ff8c8c' : '#cdd6df';
-      const stats = `💰 $${Math.round(exp.cash)}    ⚖ P&L $${Math.round(exp.pnl)}    🧭 trips ${exp.tripsCompleted}    🚛 in-flight ${exp.inFlight.length}`;
-      const statsTxt = this.add.text(x + 36, ry + 22, stats, {
-        fontFamily: 'monospace', fontSize: '11px', color: pnlColor,
-      }).setDepth(58);
-      this.exportersFrame.group.add(statsTxt); this.exportersDynamicNodes.push(statsTxt);
-
-      // In-flight cargoes (up to 3 shown)
-      if (exp.inFlight.length > 0) {
-        const cargos = exp.inFlight.slice(0, 3).map(c => {
-          const eta = c.etaDay - s.time.totalDays;
-          return `${c.units}u ${c.pid} ${c.srcCid}→${c.dstCid} ETA ${eta}d`;
-        }).join('  ·  ');
-        const more = exp.inFlight.length > 3 ? `  +${exp.inFlight.length - 3} more` : '';
-        const cargoTxt = this.add.text(x + 36, ry + 42, cargos + more, {
-          fontFamily: 'monospace', fontSize: '10px', color: '#88c8ff',
-        }).setDepth(58);
-        this.exportersFrame.group.add(cargoTxt); this.exportersDynamicNodes.push(cargoTxt);
-      } else if (!exp.bankrupt) {
-        const idleTxt = this.add.text(x + 36, ry + 42, '(scouting for next trip)', {
-          fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-        }).setDepth(58);
-        this.exportersFrame.group.add(idleTxt); this.exportersDynamicNodes.push(idleTxt);
-      }
-    });
-  }
-
-  // -----------------------------------------------------------------------
   // COMPANIES MODAL — all companies (player + AI), debt, cash, industries
   // -----------------------------------------------------------------------
   buildCompaniesModal() {
@@ -3139,9 +2988,7 @@ export class Game extends Phaser.Scene {
 
     const { x, y, w, h, contentTop, contentBottom } = this.worldFrame;
     if (!s.ui.worldSelectedPid) s.ui.worldSelectedPid = null;            // null = total
-    if (!s.ui.worldFlowDays) s.ui.worldFlowDays = 30;
     const selectedPid = s.ui.worldSelectedPid;
-    const days = s.ui.worldFlowDays;
 
     // ---- Producible chip selector at top ----
     const chipsTop = contentTop;
@@ -3198,30 +3045,8 @@ export class Game extends Phaser.Scene {
       positions[cid] = { x: cx + Math.cos(angle) * radius, y: cyCenter + Math.sin(angle) * radius };
     });
 
-    // ---- Compute net flows per pair for thickness scaling ----
-    // For each unordered pair {a,b}, compute volA→B and volB→A over `days`,
-    // then the NET flow (positive = A exports to B). The arrow points from
-    // exporter to importer with thickness ∝ |net|.
-    const pairs = [];
-    let maxVol = 0;
-    const seen = new Set();
-    for (const a of COUNTRY_IDS) {
-      for (const b of COUNTRY_IDS) {
-        if (a === b) continue;
-        const key = [a, b].sort().join('|');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const aToB = tradeFlowVolume(s, a, b, selectedPid, days);
-        const bToA = tradeFlowVolume(s, b, a, selectedPid, days);
-        const net = aToB - bToA;
-        const total = aToB + bToA;
-        if (total > maxVol) maxVol = total;
-        pairs.push({ a, b, aToB, bToA, net, total });
-      }
-    }
-
-    // ---- Draw edges (arrows or dim lines) ----
-    const nodeRadiusOf = {};   // we'll compute below; precomputed to stop arrow short
+    // ---- Draw edges — dim topology lines between countries ----
+    const nodeRadiusOf = {};
     const allPop = COUNTRY_IDS.map(c => s.countries[c]?.population || 0);
     const maxPop = Math.max(...allPop, 1);
     for (const cid of COUNTRY_IDS) {
@@ -3229,76 +3054,25 @@ export class Game extends Phaser.Scene {
       nodeRadiusOf[cid] = 12 + (pop / maxPop) * 30;
     }
 
-    for (const p of pairs) {
-      const pa = positions[p.a], pb = positions[p.b];
-      const dist = DISTANCES[p.a]?.[p.b] ?? 0;
-
-      if (p.total <= 0) {
-        // No flow recorded — show a dim line so the topology is still visible.
+    const seen = new Set();
+    for (const a of COUNTRY_IDS) {
+      for (const b of COUNTRY_IDS) {
+        if (a === b) continue;
+        const key = [a, b].sort().join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const pa = positions[a], pb = positions[b];
+        const dist = DISTANCES[a]?.[b] ?? 0;
         this.worldGfx.lineStyle(1, 0x3a4d63, 0.4);
         this.worldGfx.lineBetween(pa.x, pa.y, pb.x, pb.y);
-      } else {
-        // Arrow goes from exporter to importer. If net is 0 (same in both
-        // directions), draw a thin neutral line.
-        const exporter = p.net >= 0 ? p.a : p.b;
-        const importer = p.net >= 0 ? p.b : p.a;
-        const ex = positions[exporter], im = positions[importer];
-        const thickness = Math.max(1.2, Math.min(8, (Math.abs(p.net) / Math.max(1, maxVol)) * 7 + 1));
-        const opacity = Math.max(0.4, Math.min(1, Math.abs(p.net) / Math.max(1, maxVol)));
-        this.drawArrow(this.worldGfx, ex.x, ex.y, im.x, im.y,
-          0x88c8ff, opacity, thickness, 11, nodeRadiusOf[importer] + 3);
-      }
-
-      // Distance + flow label near midpoint
-      const mx = (pa.x + pb.x) / 2;
-      const my = (pa.y + pb.y) / 2;
-      const lblText = p.total > 0
-        ? `${dist}d · ${Math.round(p.aToB)}↔${Math.round(p.bToA)}`
-        : `${dist}d`;
-      const distTxt = this.add.text(mx, my, lblText, {
-        fontFamily: 'monospace', fontSize: '9px',
-        color: p.total > 0 ? '#88c8ff' : '#566370',
-        backgroundColor: '#0f1923',
-      }).setOrigin(0.5).setDepth(58).setPadding(2, 1, 2, 1);
-      this.worldFrame.group.add(distTxt); this.worldDynamicNodes.push(distTxt);
-    }
-
-    // ---- In-flight exporter cargos ----
-    // Dotted lines from src→dst for each cargo currently in transit.
-    // Filtered by the selected producible if one is active.
-    for (const exp of (s.exporters || [])) {
-      for (const cargo of exp.inFlight) {
-        if (selectedPid && cargo.pid !== selectedPid) continue;
-        const a = positions[cargo.srcCid];
-        const b = positions[cargo.dstCid];
-        if (!a || !b) continue;
-        // Progress 0..1: how close to arrival.
-        const dist = DISTANCES[cargo.srcCid]?.[cargo.dstCid] ?? 1;
-        const totalDays = Math.max(1, Math.round(2 * dist));   // EXPORTERS.etaDaysPerDistance × dist
-        const remaining = Math.max(0, cargo.etaDay - s.time.totalDays);
-        const progress = Math.max(0.02, Math.min(0.98, 1 - remaining / totalDays));
-        // Dotted path A → progress point
-        const px = a.x + (b.x - a.x) * progress;
-        const py = a.y + (b.y - a.y) * progress;
-        this.worldGfx.lineStyle(2, exp.color, 0.7);
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        const nx = dx / len, ny = dy / len;
-        // Dotted segments along the route up to the cargo position.
-        const segLen = 6, gap = 4;
-        let dPos = 0;
-        const maxD = Math.sqrt((px - a.x) ** 2 + (py - a.y) ** 2);
-        while (dPos < maxD) {
-          const sx = a.x + nx * dPos;
-          const sy = a.y + ny * dPos;
-          const ex = a.x + nx * Math.min(dPos + segLen, maxD);
-          const ey = a.y + ny * Math.min(dPos + segLen, maxD);
-          this.worldGfx.lineBetween(sx, sy, ex, ey);
-          dPos += segLen + gap;
-        }
-        // Cargo marker
-        this.worldGfx.fillStyle(exp.color, 1);
-        this.worldGfx.fillCircle(px, py, 3);
+        const mx = (pa.x + pb.x) / 2;
+        const my = (pa.y + pb.y) / 2;
+        const distTxt = this.add.text(mx, my, `${dist}d`, {
+          fontFamily: 'monospace', fontSize: '9px',
+          color: '#566370',
+          backgroundColor: '#0f1923',
+        }).setOrigin(0.5).setDepth(58).setPadding(2, 1, 2, 1);
+        this.worldFrame.group.add(distTxt); this.worldDynamicNodes.push(distTxt);
       }
     }
 
@@ -3337,12 +3111,10 @@ export class Game extends Phaser.Scene {
     }
 
     // ---- Legend ----
-    const legendText = selectedPid
-      ? `▶ flow direction = exporter→importer    │    thickness = ${days}d net volume of ${PRODUCIBLES[selectedPid].name}    │    click country to inspect`
-      : `▶ flow direction = exporter→importer    │    thickness = ${days}d net volume (all goods)    │    click country to inspect`;
-    const legend = this.add.text(x + 18, contentBottom - 14, legendText, {
-      fontFamily: 'monospace', fontSize: '9px', color: '#566370',
-    });
+    const legend = this.add.text(x + 18, contentBottom - 14,
+      '▶ click a country node to inspect it    │    lines show distance between towns', {
+        fontFamily: 'monospace', fontSize: '9px', color: '#566370',
+      });
     this.worldFrame.group.add(legend); this.worldDynamicNodes.push(legend);
   }
 
