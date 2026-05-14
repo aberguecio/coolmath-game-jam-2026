@@ -36,7 +36,7 @@ export const INFO_TEXTS = {
   },
   'wage-portion': {
     title: 'Wage Portion',
-    body: 'Fraction of every sale that becomes worker wages, flowing into the seller-country wage fund. Per producible (raw food ~35%, raw mining ~10%, final goods ~25%). Configured in producibles.js.',
+    body: 'Fraction of every sale that becomes worker wages, flowing into the seller-country wage fund. Per producible (raw food ~35%, final goods ~25%). Configured in producibles.js.',
   },
   'industry-build': {
     title: 'Build Industry',

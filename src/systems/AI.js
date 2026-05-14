@@ -3,11 +3,9 @@ import { PRODUCIBLES, PRODUCIBLE_LIST } from '../data/producibles.js';
 import { applyForLoan } from './Bank.js';
 import { tilePrice, pushLog, pushAIDecision } from '../state/GameState.js';
 import { aiTryOffer, tickOffers } from './Trade.js';
-import { canMineHere } from './Mining.js';
 import { lockTypeForCategory } from './Farming.js';
 import {
   effectiveSetupCost, effectivePlowCost, effectiveHarvestCost,
-  effectiveMonthlyOpCost,
 } from './Inflation.js';
 import { plantTile, plowTile } from './Farming.js';
 import { expectedPriceAt } from './Forecast.js';
@@ -73,10 +71,9 @@ function aiPickBestVenture(state, ai, tile) {
   let best = null;
   let bestMargin = -Infinity;
 
-  // === Crops + minerals ===
+  // === Crops ===
   for (const def of PRODUCIBLE_LIST) {
     if (def.category === 'processed') continue;
-    if (def.category === 'mining' && !canMineHere(tile, def)) continue;
     const wantLock = lockTypeForCategory(def.category);
     if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
 
@@ -93,18 +90,13 @@ function aiPickBestVenture(state, ai, tile) {
     const revPerCycle = priceFuture * def.yieldUnits;
     const harvestCost = effectiveHarvestCost(state, cid, def);
 
-    let cyclesPerMonth, recurringMonthlyCost;
-    if (def.category === 'mining') {
-      // Each "cycle" is the regrowDays after first growth — recurring extraction.
-      cyclesPerMonth = 30 / (def.perennial?.regrowDays || def.growthDays);
-      recurringMonthlyCost = effectiveMonthlyOpCost(state, cid, def);
-    } else if (def.perennial) {
+    let cyclesPerMonth;
+    if (def.perennial) {
       cyclesPerMonth = 30 / def.perennial.regrowDays;
-      recurringMonthlyCost = 0;
     } else {
       cyclesPerMonth = 30 / def.growthDays;
-      recurringMonthlyCost = 0;
     }
+    const recurringMonthlyCost = 0;
 
     const monthlyMargin = (revPerCycle - harvestCost) * cyclesPerMonth - recurringMonthlyCost;
     if (monthlyMargin > bestMargin) {
@@ -199,7 +191,7 @@ export function tickAI(state) {
 // góndola se reabastezca con más frecuencia (antes era mensual).
 export function tickAIWeekly(state) {
   for (const ai of state.aiFarmers) {
-    aiTrySellInventory(state, ai);       // drip-sell harvested crops/minerals
+    aiTrySellInventory(state, ai);       // drip-sell harvested crops
   }
 }
 

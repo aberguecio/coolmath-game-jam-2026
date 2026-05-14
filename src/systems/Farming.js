@@ -5,7 +5,6 @@ import { applyForLoan, quoteLoan, walletFor } from './Bank.js';
 import { tilePrice, pushLog, pushFx } from '../state/GameState.js';
 import { lotePrice, isInsideHalo } from './City.js';
 import { growthMultiplier } from './Events.js';
-import { canMineHere, mineralRichness } from './Mining.js';
 import {
   effectiveHarvestCost, effectivePlowCost,
   effectiveSetupCost, setupCostSplit,
@@ -19,9 +18,7 @@ export function expectedYield(producible, quality) {
   return Math.round(producible.yieldUnits * applyCurve(producible.yieldCurve, quality));
 }
 
-// For minerals, the "quality" feeding yield is the deposit richness, not soil quality.
-export function effectiveQualityFor(def, tile) {
-  if (def.category === 'mining') return mineralRichness(tile, def.id);
+export function effectiveQualityFor(_def, tile) {
   return tile.quality;
 }
 
@@ -176,11 +173,6 @@ function tickFarmingTile(state, tile) {
     if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') return;
     const def = PRODUCIBLES[tile.crop];
     if (!def) return;
-    // Mining-specific gates.
-    if (def.category === 'mining') {
-      if (tile.miningStalled) return;            // legacy stall flag (pre-F3)
-      if (tile.miningStatus === 'closed') return; // explicitly closed by player/AI
-    }
     tile.ageDays += 1;
 
     // Auto-harvest fires only for AI farmers OR player tiles with autoMode on.
@@ -198,11 +190,10 @@ function tickFarmingTile(state, tile) {
         if (autoFire) autoHarvest(state, tile, def);
       }
     } else if (tile.state === 'mature') {
-      // Grace-period rot/regrow. Mining tiles are exempt (they have their own
-      // lifespan/regrow rules). If the mature tile sits too long unharvested,
+      // Grace-period rot/regrow. If the mature tile sits too long unharvested,
       // an annual rots (lockType preserved) and a perennial falls back to
       // 'cosechado' losing this cycle's fruit but keeping the plant alive.
-      if (def.category !== 'mining' && tile.matureSinceDay != null) {
+      if (tile.matureSinceDay != null) {
         const sinceMature = state.time.totalDays - tile.matureSinceDay;
         if (sinceMature > FARMING.harvestGraceDays) {
           if (def.perennial) {
@@ -316,10 +307,9 @@ export function plowTile(state, tile, ownerId = 'player') {
 }
 
 // Producible category → tile lockType. Once a tile commits to a category it
-// stays committed; future plant/build calls must match.
+// stays committed; future plant calls must match.
 export function lockTypeForCategory(category) {
   if (category === 'annual_crop' || category === 'perennial_crop') return 'crop';
-  if (category === 'mining') return 'mining';
   return null;                                  // 'processed' → not plantable
 }
 
@@ -335,9 +325,6 @@ export function plantTile(state, tile, producibleId, ownerId = 'player') {
   const requiredState = def.requiresPlow ? 'plowed' : 'fallow';
   if (tile.state !== requiredState) {
     return { ok: false, reason: def.requiresPlow ? 'Plow first' : 'Tile not ready' };
-  }
-  if (def.category === 'mining' && !canMineHere(tile, def)) {
-    return { ok: false, reason: tile.surveyed ? 'No deposit here' : 'Survey the tile first' };
   }
   const wantLock = lockTypeForCategory(def.category);
   if (tile.lockType && wantLock && tile.lockType !== wantLock) {
@@ -379,8 +366,6 @@ export function uprootTile(state, tile) {
   tile.plantedDay = null;
   tile.ageDays = 0;
   tile.lastCrop = null;        // also clear so auto-replant retry doesn't fire
-  tile.miningStalled = false;
-  tile.miningStatus = 'operational';   // reset so a future mine starts clean
   tile.autoReplant = false;
   // autoMode is a user preference; keep it.
   if (tile.owner === 'player' && lastDef) {

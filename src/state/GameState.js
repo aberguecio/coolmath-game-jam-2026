@@ -3,7 +3,6 @@ import { distanceToCity, cityRadius } from '../systems/City.js';
 import { createAIFarmersForCountry } from '../systems/AI.js';
 import { createCountriesState, initMarket } from '../systems/Market.js';
 import { initMarketSnapshot } from '../systems/MarketHistory.js';
-import { generateMineralDeposits } from '../systems/Mining.js';
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID, COUNTRIES } from '../data/countries.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
 import { TAX_RATES } from '../data/taxRates.js';
@@ -68,9 +67,6 @@ function generateTilesFor(countryId, seed) {
         plantedDay: null,
         ageDays: 0,
         lastHarvestDay: null,
-        minerals: {},
-        surveyed: false,
-        boomFactor: 1,
         pendingOffer: null,
         autoReplant: false,
         // Auto-management: when true, plowing/planting/harvesting fire automatically
@@ -79,12 +75,9 @@ function generateTilesFor(countryId, seed) {
         // AI farmers always operate as if autoMode = true (hired-labor model).
         autoMode: false,
         // Land lock-in: once a tile is committed to a category it stays committed
-        // even after the venture ends. Permitted values: null | 'crop' | 'mining' | 'industry'.
-        // Set on first plantTile / buildIndustry; never cleared (uproot keeps lockType).
+        // even after the venture ends. Permitted values: null | 'crop'.
+        // Set on first plantTile; never cleared (uproot keeps lockType).
         lockType: null,
-        // Mining status machine. 'operational' = pays monthlyOpCost and produces.
-        // 'closed' = paused (no cost, no production). Only meaningful for mining tiles.
-        miningStatus: 'operational',
         // Day the tile first entered 'mature'. Drives the grace-period rot/regrow
         // logic — an annual past `FARMING.harvestGraceDays` rots; a perennial
         // falls back to 'cosechado' losing that cycle's fruit. Cleared on
@@ -251,7 +244,6 @@ export function createInitialState() {
 
   initMarket(state);
   initMarketSnapshot(state);
-  generateMineralDeposits(state);
 
   return state;
 }
@@ -332,7 +324,6 @@ export function tilePrice(tile, state = null) {
       base *= 1 + proximity * 1.5;
     }
   }
-  base *= tile.boomFactor ?? 1;
   return Math.round(base);
 }
 

@@ -51,14 +51,6 @@ export const FORECLOSURE = {
   saleMax: 0.80,
 };
 
-// Surveying & mineral discovery
-export const MINERALS = {
-  surveyLabor: 6,                  // labor (worker-months) to survey a tile; cash = labor × wageRate
-  discoveryRadius: 3,              // tiles around a discovered mineral get a price boost
-  discoveryBoost: 0.6,             // adds up to +60% to nearby tile prices, fades with distance
-  maxBoom: 2.5,                    // hard cap on cumulative boom multiplier
-};
-
 // Land offers between actors (AI ↔ player).
 export const OFFERS = {
   expirationDays: 30,

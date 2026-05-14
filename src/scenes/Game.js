@@ -25,19 +25,14 @@ import {
   lockTypeForCategory, uprootTile,
 } from '../systems/Farming.js';
 import {
-  effectiveHarvestCost, effectiveMonthlyOpCost, effectiveSetupCost,
-  effectivePlowCost, effectiveSurveyCost, effectiveSalary,
+  effectiveHarvestCost, effectiveSetupCost,
+  effectivePlowCost, effectiveSalary,
 } from '../systems/Inflation.js';
 import { tickLaborMarket, wageRateFor } from '../systems/Labor.js';
 import { tickStorageCost, storageBillFor } from '../systems/Storage.js';
 import { tickExporters } from '../systems/Exporters.js';
 import { aiExporterTryShipment } from '../systems/ExporterAI.js';
-import { EXPORTERS } from '../data/tunables.js';
-import {
-  surveyTile, mineralRichness, canMineHere, tickMiningOps,
-  closeMine, reopenMine,
-} from '../systems/Mining.js';
-import { MINERALS, OFFERS } from '../data/tunables.js';
+import { EXPORTERS, OFFERS } from '../data/tunables.js';
 import {
   acceptOffer, rejectOffer, counterOffer, makePurchaseOffer,
   buyStartingAmount, buyAcceptProbability, counterAcceptProbability,
@@ -288,9 +283,7 @@ export class Game extends Phaser.Scene {
         else if (tile.state === 'planted') {
           const def = tile.crop ? PRODUCIBLES[tile.crop] : null;
           if (def) {
-            // Mining tiles use a rocky-grey base instead of the brown soil base
-            // so the player can tell at a glance "this is a mine, not a crop".
-            const baseColor = def.category === 'mining' ? 0x3a3a42 : 0x6b4a2a;
+            const baseColor = 0x6b4a2a;
             const interp = Phaser.Display.Color.Interpolate.ColorWithColor(
               Phaser.Display.Color.IntegerToColor(baseColor),
               Phaser.Display.Color.IntegerToColor(def.color),
@@ -327,13 +320,12 @@ export class Game extends Phaser.Scene {
       rect.setStrokeStyle(strokeWidth, strokeColor, strokeAlpha);
     }
     // Surveyed tiles: render small mineral dots in the corner
-    this.refreshMineralDots();
+    this.refreshTileOverlays();
   }
 
-  refreshMineralDots() {
+  refreshTileOverlays() {
     if (!this.mineralDots) this.mineralDots = this.add.graphics().setDepth(2);
     this.mineralDots.clear();
-    const s = this.state;
     const { tilePx } = MAP;
     const map = this.currentMap();
     for (const tile of map.tiles) {
@@ -348,28 +340,6 @@ export class Game extends Phaser.Scene {
         this.mineralDots.fillStyle(0x6ee7b7, 1);
         this.mineralDots.fillCircle(x0 + tilePx - 4, y0 + 3, 1.2);
       }
-
-      if (!tile.surveyed) continue;
-      const minerals = [];
-      for (const def of PRODUCIBLE_LIST) {
-        if (def.category !== 'mining') continue;
-        const r = mineralRichness(tile, def.id);
-        if (r > 0) minerals.push({ color: def.color, r });
-      }
-      if (minerals.length === 0) {
-        this.mineralDots.lineStyle(1, 0x566370, 0.7);
-        this.mineralDots.lineBetween(x0 + 3, y0 + 3, x0 + 7, y0 + 7);
-        this.mineralDots.lineBetween(x0 + 7, y0 + 3, x0 + 3, y0 + 7);
-        continue;
-      }
-      minerals.slice(0, 3).forEach((m, i) => {
-        const cx = x0 + 4 + i * 6;
-        const cy = y0 + 4;
-        this.mineralDots.fillStyle(m.color, 1);
-        this.mineralDots.fillCircle(cx, cy, 2.5);
-        this.mineralDots.lineStyle(1, 0x000000, 0.7);
-        this.mineralDots.strokeCircle(cx, cy, 2.5);
-      });
     }
   }
 
@@ -614,12 +584,7 @@ export class Game extends Phaser.Scene {
     if (!tile) {
       this.panelText.setText('Hover or click a tile.\n\nClick once to select and see actions.\n\nKeys: 1/2/3 speed, SPACE pause, ESC deselect.');
     } else {
-      // For mining tiles, show "mining" / "ready" instead of "planted" / "mature".
-      const cropDef = tile.crop ? PRODUCIBLES[tile.crop] : null;
-      const isMining = cropDef && cropDef.category === 'mining';
-      const stateText = isMining
-        ? (tile.state === 'planted' ? 'mining' : tile.state === 'mature' ? 'ready' : (STATE_LABEL[tile.state] || tile.state))
-        : (STATE_LABEL[tile.state] || tile.state);
+      const stateText = STATE_LABEL[tile.state] || tile.state;
       const lines = [
         `Tile (${tile.x},${tile.y})`,
         `Owner: ${this.ownerLabel(tile)}`,
@@ -629,65 +594,38 @@ export class Game extends Phaser.Scene {
       ];
       if (tile.crop) {
         const def = PRODUCIBLES[tile.crop];
-        const isMining = def.category === 'mining';
-        if (isMining) {
-          const richness = mineralRichness(tile, def.id);
-          lines.push(`⛏ Mining: ${def.name} (${(richness * 100).toFixed(0)}% rich)`);
-          if (tile.state === 'planted') lines.push(`Extraction: ${(tile.growth * 100).toFixed(0)}%`);
-          // Monthly operating cost (always charged for mines)
-          const opCost = effectiveMonthlyOpCost(s, tile.countryId, def);
-          if (opCost > 0) lines.push(`Ops cost: $${opCost}/mo${tile.miningStalled ? ' ⚠ STALLED' : ''}`);
-        } else {
-          lines.push(`Crop: ${def.name}`);
-          if (tile.state === 'planted') lines.push(`Growth: ${(tile.growth * 100).toFixed(0)}%`);
-          // Estimated harvest economics — visible BEFORE harvesting so the player isn't surprised.
-          const yieldEst = expectedYield(def, effectiveQualityFor(def, tile));
-          const priceNow = Math.round(s.market.prices?.[tile.countryId]?.[def.id] || 0);
-          const revEst = priceNow * yieldEst;
-          const labor = effectiveHarvestCost(s, tile.countryId, def);
-          const auto = tile.autoMode === true || tile.owner !== 'player';
-          const laborText = auto ? `−$${labor} (auto)` : `−$0 (manual)`;
-          const net = revEst - (auto ? labor : 0);
-          const netColor = net >= 0 ? '🟢' : '🔴';
-          lines.push(`Est. revenue: $${revEst} (${yieldEst}u × $${priceNow})`);
-          lines.push(`Harvest labor: ${laborText}`);
-          lines.push(`Net (est.): ${netColor} $${net}`);
-          // Grace-period warning + skip indicator on mature tiles.
-          if (tile.state === 'mature' && tile.matureSinceDay != null) {
-            const sinceMature = s.time.totalDays - tile.matureSinceDay;
-            const daysToRot = FARMING.harvestGraceDays - sinceMature;
-            if ((tile.skipStreak || 0) > 0) {
-              lines.push(`⏸ Auto-skipped × ${tile.skipStreak} (price too low for labor)`);
-            }
-            if (daysToRot <= 10) {
-              const verb = def.perennial ? 'fruit lost' : 'rots to fallow';
-              lines.push(`⏱ ${verb} in ${Math.max(0, daysToRot)}d if not harvested`);
-            }
+        lines.push(`Crop: ${def.name}`);
+        if (tile.state === 'planted') lines.push(`Growth: ${(tile.growth * 100).toFixed(0)}%`);
+        // Estimated harvest economics — visible BEFORE harvesting so the player isn't surprised.
+        const yieldEst = expectedYield(def, effectiveQualityFor(def, tile));
+        const priceNow = Math.round(s.market.prices?.[tile.countryId]?.[def.id] || 0);
+        const revEst = priceNow * yieldEst;
+        const labor = effectiveHarvestCost(s, tile.countryId, def);
+        const auto = tile.autoMode === true || tile.owner !== 'player';
+        const laborText = auto ? `−$${labor} (auto)` : `−$0 (manual)`;
+        const net = revEst - (auto ? labor : 0);
+        const netColor = net >= 0 ? '🟢' : '🔴';
+        lines.push(`Est. revenue: $${revEst} (${yieldEst}u × $${priceNow})`);
+        lines.push(`Harvest labor: ${laborText}`);
+        lines.push(`Net (est.): ${netColor} $${net}`);
+        // Grace-period warning + skip indicator on mature tiles.
+        if (tile.state === 'mature' && tile.matureSinceDay != null) {
+          const sinceMature = s.time.totalDays - tile.matureSinceDay;
+          const daysToRot = FARMING.harvestGraceDays - sinceMature;
+          if ((tile.skipStreak || 0) > 0) {
+            lines.push(`⏸ Auto-skipped × ${tile.skipStreak} (price too low for labor)`);
+          }
+          if (daysToRot <= 10) {
+            const verb = def.perennial ? 'fruit lost' : 'rots to fallow';
+            lines.push(`⏱ ${verb} in ${Math.max(0, daysToRot)}d if not harvested`);
           }
         }
       }
       if (tile.lockType) {
-        const lockEmoji = tile.lockType === 'crop' ? '🌾' : '⛏';
-        lines.push(`🔒 Locked to ${lockEmoji} ${tile.lockType}`);
+        lines.push(`🔒 Locked to 🌾 ${tile.lockType}`);
       }
       if (tile.owner === 'wild') lines.push(`Price: $${tilePrice(tile, s)}`);
       if (isInsideHalo(tile, s.city)) lines.push(`City halo · lot: $${lotePrice(tile, s.city)}`);
-      // Boom indicator (visible whether owned or not)
-      if ((tile.boomFactor ?? 1) > 1.05) {
-        lines.push(`Boom +${Math.round(((tile.boomFactor - 1) * 100))}% (nearby discovery)`);
-      }
-      // Survey results
-      if (tile.surveyed) {
-        const deposits = [];
-        for (const def of PRODUCIBLE_LIST) {
-          if (def.category !== 'mining') continue;
-          const r = mineralRichness(tile, def.id);
-          if (r > 0) deposits.push(`${def.name} ${(r * 100).toFixed(0)}%`);
-        }
-        lines.push(deposits.length ? `Deposits: ${deposits.join(', ')}` : 'Deposits: none');
-      } else if (tile.owner === 'player') {
-        lines.push('Not surveyed');
-      }
       this.panelText.setText(lines.join('\n'));
 
       // Use the actual rendered height of the wrapped text instead of guessing
@@ -769,43 +707,14 @@ export class Game extends Phaser.Scene {
       }
 
       if (isHomeView && tile.owner === 'player' && s.selection.tileId === tile.id) {
-        // Survey state-aware action: not surveyed → button; surveyed empty → disabled status.
-        if (!tile.surveyed) {
-          const surveyEffective = effectiveSurveyCost(s, tile.countryId);
-          y = this.addActionButton(
-            `Survey land`,
-            y,
-            s.player.cash >= surveyEffective,
-            () => {
-              const r = surveyTile(s, tile);
-              if (!r.ok && r.reason) pushLog(s, r.reason);
-              this.refreshAll();
-            },
-            `$${surveyEffective} · reveals minerals`,
-            0xb27a3a,
-          );
-        } else {
-          // Already surveyed — show a status row so the player can tell why mining isn't an option.
-          const hasAny = PRODUCIBLE_LIST.some(
-            d => d.category === 'mining' && (mineralRichness(tile, d.id) > 0),
-          );
-          if (!hasAny) {
-            y = this.addActionButton(
-              `✕ No minerals (surveyed)`,
-              y, false, () => {}, '', 0x2a2a32,
-            );
-          }
-        }
-        // Plow only makes sense for crops. Hide if the tile is locked to mining
-        // or industry — plow won't lead anywhere useful.
+        // Plow only makes sense for crops.
         if (tile.state === 'fallow' && (tile.lockType == null || tile.lockType === 'crop')) {
           const plowEffective = effectivePlowCost(s, tile.countryId);
           y = this.addActionButton(`Plow`, y, s.player.cash >= plowEffective, () => {
             const r = plowTile(s, tile); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll();
           }, `$${plowEffective}`);
         }
-        // Plowed tile → crops that need plowing. Filtered by lockType so we don't
-        // show "Plant Wheat" on a tile locked to mining (it would be rejected).
+        // Plowed tile → crops that need plowing.
         if (tile.state === 'plowed') {
           for (const def of PRODUCIBLE_LIST) {
             if (def.category === 'processed') continue;        // industry-only outputs
@@ -819,27 +728,6 @@ export class Game extends Phaser.Scene {
               s.player.cash >= setupEff,
               () => { const r = plantTile(s, tile, def.id); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll(); },
               `$${setupEff} · ${def.growthDays}d`,
-            );
-          }
-        }
-        // Fallow tile → producibles that don't need plowing (e.g. mining). Same
-        // lockType filter so an ex-crop tile doesn't offer mining and vice-versa.
-        if (tile.state === 'fallow') {
-          for (const def of PRODUCIBLE_LIST) {
-            if (def.category === 'processed') continue;        // industry-only outputs
-            if (def.requiresPlow !== false) continue;
-            if (def.category === 'mining' && !canMineHere(tile, def)) continue;
-            const wantLock = lockTypeForCategory(def.category);
-            if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
-            const richness = mineralRichness(tile, def.id);
-            const richHint = def.category === 'mining' ? ` · ${(richness * 100).toFixed(0)}% rich` : '';
-            const setupEff = effectiveSetupCost(s, tile.countryId, def);
-            y = this.addActionButton(
-              `${def.actionVerb || 'Plant'} ${def.name}`,
-              y,
-              s.player.cash >= setupEff,
-              () => { const r = plantTile(s, tile, def.id); if (!r.ok && r.reason) pushLog(s, r.reason); this.refreshAll(); },
-              `$${setupEff} · ${def.growthDays}d${richHint}`,
             );
           }
         }
@@ -865,48 +753,21 @@ export class Game extends Phaser.Scene {
         // Manual mode = player clicks Harvest themselves for $0 labor.
         if (tile.crop && tile.owner === 'player') {
           const def = PRODUCIBLES[tile.crop];
-          const isMining = def.category === 'mining';
-          if (!isMining) {                                  // mining is always auto
-            const isAuto = tile.autoMode === true;
-            const labor = effectiveHarvestCost(s, tile.countryId, def);
-            const plow = def.requiresPlow ? effectivePlowCost(s, tile.countryId) : 0;
-            const setup = effectiveSetupCost(s, tile.countryId, def) + plow;
-            const hint = isAuto
-              ? `auto-harvest $${labor} + replants ($${setup}/cycle)`
-              : 'click harvest yourself · no labor cost';
-            y = this.addToggleSwitch(
-              '🤖 Auto-manage', y, isAuto,
-              () => { tile.autoMode = !tile.autoMode; this.refreshAll(); },
-              hint,
-            );
-          }
+          const isAuto = tile.autoMode === true;
+          const labor = effectiveHarvestCost(s, tile.countryId, def);
+          const plow = def.requiresPlow ? effectivePlowCost(s, tile.countryId) : 0;
+          const setup = effectiveSetupCost(s, tile.countryId, def) + plow;
+          const hint = isAuto
+            ? `auto-harvest $${labor} + replants ($${setup}/cycle)`
+            : 'click harvest yourself · no labor cost';
+          y = this.addToggleSwitch(
+            '🤖 Auto-manage', y, isAuto,
+            () => { tile.autoMode = !tile.autoMode; this.refreshAll(); },
+            hint,
+          );
         }
 
-        // Mining open/close toggle — closed mines pay no labor and don't produce.
-        // Reopening costs a fraction of seedCost (restart fee).
-        if (tile.crop && tile.owner === 'player') {
-          const def = PRODUCIBLES[tile.crop];
-          if (def.category === 'mining') {
-            const isOpen = tile.miningStatus !== 'closed';
-            const reopenCost = Math.round(effectiveSetupCost(s, tile.countryId, def) * 0.3); // 30% restart capital
-            const hint = isOpen
-              ? `pays ${effectiveMonthlyOpCost(s, tile.countryId, def)}/mo · producing`
-              : `reopen costs $${reopenCost}`;
-            y = this.addToggleSwitch(
-              isOpen ? '⛏ Mine OPEN' : '⛏ Mine CLOSED',
-              y, isOpen,
-              () => {
-                const r = isOpen ? closeMine(s, tile) : reopenMine(s, tile);
-                if (!r.ok && r.reason) pushLog(s, r.reason);
-                this.refreshAll();
-              },
-              hint,
-            );
-          }
-        }
-
-        // Uproot button — works on any venture (crop in any state, mine,
-        // industry). Tile returns to fallow but lockType is preserved.
+        // Uproot button — works on any crop venture. Tile returns to fallow but lockType is preserved.
         if (tile.crop && tile.owner === 'player') {
           y = this.addActionButton(
             '🪓 Uproot',
@@ -1225,22 +1086,17 @@ export class Game extends Phaser.Scene {
     // ============================================================
     // INFO BLOCK — country snapshot
     // ============================================================
-    // Count ventures owned by AI farmers/player in this country.
-    let nMineActive = 0, nMineClosed = 0, nCropActive = 0, nCropFallow = 0;
+    // Count crop ventures owned by AI farmers/player in this country.
+    let nCropActive = 0, nCropFallow = 0;
     const map = s.maps?.[countryId];
     if (map) {
       for (const tile of map.tiles) {
         if (!tile.crop) continue;
         if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
         const def = PRODUCIBLES[tile.crop];
-        if (!def) continue;
-        if (def.category === 'mining') {
-          if (tile.miningStatus === 'closed') nMineClosed++;
-          else nMineActive++;
-        } else if (def.category !== 'processed') {
-          if (tile.state === 'fallow' || tile.state === 'plowed') nCropFallow++;
-          else nCropActive++;
-        }
+        if (!def || def.category === 'processed') continue;
+        if (tile.state === 'fallow' || tile.state === 'plowed') nCropFallow++;
+        else nCropActive++;
       }
     }
 
@@ -1307,9 +1163,8 @@ export class Game extends Phaser.Scene {
       'LABOR DEMAND\n\n' +
       'Active jobs in this town.\n\n' +
       'Sum of:\n' +
-      '• monthlyLabor for each active mining tile\n' +
       '• 1 worker per crop tile in cultivation (any crop, same cost)\n\n' +
-      'Goes up when mines / crop tiles go active. Drops when they close or go fallow.');
+      'Goes up when crop tiles go active. Drops when they go fallow.');
 
     rowWithInfo(colA, infoTop + lineH * 4,
       `Wage: $${wage}/mo·worker  (×${tightnessStr})`,
@@ -1321,8 +1176,7 @@ export class Game extends Phaser.Scene {
       '×tightness is the current pressure = √(demand/supply). >1 = tight market (wage rising). <1 = labor surplus (wage falling).\n\n' +
       'Affects EVERY labor cost:\n' +
       '• Crop harvest cost (harvestLabor × wage)\n' +
-      '• Mine monthly op cost\n' +
-      '• Plow / survey / storage costs\n\n' +
+      '• Plow / storage costs\n\n' +
       'NOT multiplied by priceIndex — wage is independent of cost-of-living.');
 
     ls(colB, infoTop, '── ECONOMY ──', '#7a8694', '10px');
@@ -1332,7 +1186,7 @@ export class Game extends Phaser.Scene {
       'WAGE FUND\n\n' +
       'The town\'s accumulated wage pot. This is the cash population has available to spend on food.\n\n' +
       'Money flows in from:\n' +
-      '• Harvest cost / plow / survey / storage cost\n' +
+      '• Harvest cost / plow / storage cost\n' +
       '• Welfare top-up from treasury when it falls below floor\n\n' +
       'Money flows out to:\n' +
       '• Population buying food daily (goes to marketPool)\n\n' +
@@ -1370,7 +1224,7 @@ export class Game extends Phaser.Scene {
       'Affects:\n' +
       '• Industry build cost\n' +
       '• tilePrice (buying land)\n' +
-      '• Plow / survey / setup cost (the commodity portion)\n\n' +
+      '• Plow / setup cost (the commodity portion)\n\n' +
       'Does NOT affect wage (which comes from the labor market, not the basket).');
 
     // Ventures row
@@ -1378,14 +1232,6 @@ export class Game extends Phaser.Scene {
     ls(colA, venturesY, '── VENTURES ──', '#7a8694', '10px');
 
     rowWithInfo(colA, venturesY + lineH * 1,
-      `⛏ Mines: ${nMineActive} active · ${nMineClosed} closed`, '#cdd6df',
-      'MINES\n\n' +
-      'Active mining tiles for copper / iron / gold.\n\n' +
-      '• active: produce yield every growthDays and pay monthlyLabor (1 worker × wage)\n' +
-      '• closed: shut down by AI/player; no production or labor cost, but the tile keeps its "mining" lockType\n\n' +
-      'Each active mine adds 1 worker to labor demand. Setup cost = setupLabor × wage (high: 50-180 worker-months).');
-
-    rowWithInfo(colA, venturesY + lineH * 2,
       `🌾 Crop tiles: ${nCropActive} growing · ${nCropFallow} fallow/plowed`, '#cdd6df',
       'CROP TILES\n\n' +
       '• growing: planted or mature, in mid-cycle. Add 1 worker to labor demand.\n' +
@@ -1831,7 +1677,6 @@ export class Game extends Phaser.Scene {
       if (this.state.time.totalDays % 7 === 0) tickAIWeekly(this.state);
     }
     if (events.month) {
-      tickMiningOps(this.state);        // 8: mines pay monthly labor → wageFund
       tickStorageCost(this.state);      // 8c: warehouse labor for held inventory
       tickLaborMarket(this.state);      // 8d: update country wageRate via EMA
       tickLoans(this.state);            // 9: bank charges

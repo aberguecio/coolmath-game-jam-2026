@@ -20,7 +20,6 @@ import { tileById } from '../state/GameState.js';
 import {
   buyTile, plowTile, plantTile, harvestTile, uprootTile, toggleAutoReplant, loteTile,
 } from '../systems/Farming.js';
-import { surveyTile, closeMine, reopenMine } from '../systems/Mining.js';
 import { applyForLoan } from '../systems/Bank.js';
 import { sellFromInventory, buyFromGlobal } from '../systems/Market.js';
 import { exporterStartShipment } from '../systems/Exporters.js';
@@ -68,27 +67,6 @@ export function actLoteTile(state, { tileId, countryId }) {
   const tile = tileById(state, countryId, tileId);
   if (!tile) return { ok: false, reason: 'tile not found' };
   return loteTile(state, tile);
-}
-
-// =============================================================================
-// Mining
-// =============================================================================
-export function actSurveyTile(state, { tileId, countryId }) {
-  const tile = tileById(state, countryId, tileId);
-  if (!tile) return { ok: false, reason: 'tile not found' };
-  return surveyTile(state, tile, 'player');
-}
-
-export function actCloseMine(state, { tileId, countryId }) {
-  const tile = tileById(state, countryId, tileId);
-  if (!tile) return { ok: false, reason: 'tile not found' };
-  return closeMine(state, tile);
-}
-
-export function actReopenMine(state, { tileId, countryId }) {
-  const tile = tileById(state, countryId, tileId);
-  if (!tile) return { ok: false, reason: 'tile not found' };
-  return reopenMine(state, tile);
 }
 
 // =============================================================================
@@ -140,9 +118,6 @@ export const ACTION_REGISTRY = {
   uprootTile: actUprootTile,
   toggleAutoReplant: actToggleAutoReplant,
   loteTile: actLoteTile,
-  surveyTile: actSurveyTile,
-  closeMine: actCloseMine,
-  reopenMine: actReopenMine,
   sellInventory: actSellInventory,
   buyFromMarket: actBuyFromMarket,
   takeLoan: actTakeLoan,

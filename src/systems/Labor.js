@@ -27,14 +27,13 @@ export function laborSupplyFor(state, cid) {
   return (c.population || 0) * WAGES.workersPerPopUnit;
 }
 
-// Labor DEMAND: monthlyLabor of active (not-closed) mining tiles +
-//               tileTendingLabor for every crop tile in cultivation.
+// Labor DEMAND: tileTendingLabor for every crop tile in cultivation.
 // Crops are uniform (FARMING.tileTendingLabor) — harvestLabor is a cash spike
 // paid at harvest time, NOT recurring demand.
 export function laborDemandFor(state, cid) {
   let total = 0;
 
-  // Crops + mines on the country's map
+  // Crops on the country's map
   const map = state.maps?.[cid];
   if (map) {
     const tendingLabor = FARMING.tileTendingLabor ?? 1;
@@ -43,15 +42,9 @@ export function laborDemandFor(state, cid) {
       if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
       const def = PRODUCIBLES[tile.crop];
       if (!def || def.category === 'processed') continue;
-
-      if (def.category === 'mining') {
-        if (tile.miningStatus === 'closed') continue;
-        total += def.monthlyLabor ?? 0;
-      } else {
-        // crops (annual + perennial): only count while in cultivation
-        if (tile.state === 'fallow' || tile.state === 'plowed') continue;
-        total += tendingLabor;
-      }
+      // crops (annual + perennial): only count while in cultivation
+      if (tile.state === 'fallow' || tile.state === 'plowed') continue;
+      total += tendingLabor;
     }
   }
 

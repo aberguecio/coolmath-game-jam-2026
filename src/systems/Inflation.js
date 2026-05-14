@@ -3,7 +3,7 @@
 // composes price-index and (post Sprint A) wage-rate getters into the cost
 // functions other systems consume.
 
-import { LAND_ACTIONS, MINERALS } from '../data/tunables.js';
+import { LAND_ACTIONS } from '../data/tunables.js';
 import { priceIndexFor } from './PriceIndex.js';
 import { wageRateFor } from './Labor.js';
 
@@ -21,21 +21,13 @@ export function effectivePlowCost(state, cid) {
   return Math.round((LAND_ACTIONS.plow.labor || 0) * wageRateFor(state, cid));
 }
 
-// Survey — pure labor.
-export function effectiveSurveyCost(state, cid) {
-  return Math.round((MINERALS.surveyLabor || 0) * wageRateFor(state, cid));
-}
-
-// Setup cost for opening a venture on a tile (plant a crop, open a mine).
-// CROPS: labor × wageRate  +  0.1 units of the producible at its current
-//        market price (the seed itself — a commodity buy).
-// MINERALS: labor only (no "seed"; you can't plant a mineral).
+// Setup cost for opening a venture on a tile (plant a crop).
+// labor × wageRate  +  0.1 units of the producible at its current
+// market price (the seed itself — a commodity buy).
 // Used by AI for ROI decisions and by plantTile for actual cash flow — same
 // formula on both sides keeps player and AI capabilities identical.
 export function effectiveSetupCost(state, cid, def) {
   const labor = Math.round((def?.setupLabor || 0) * wageRateFor(state, cid));
-  const isCrop = def?.category === 'annual_crop' || def?.category === 'perennial_crop';
-  if (!isCrop) return labor;
   const SEED_FRACTION = 0.1;
   const price = state.market.prices?.[cid]?.[def.id] ?? def.market?.basePrice ?? 0;
   return labor + Math.round(SEED_FRACTION * price);
@@ -58,8 +50,5 @@ export function effectiveSalary(state, cid, recipe) {
 }
 export function effectiveHarvestCost(state, cid, def) {
   return Math.round((def?.harvestLabor || 0) * wageRateFor(state, cid));
-}
-export function effectiveMonthlyOpCost(state, cid, def) {
-  return Math.round((def?.monthlyLabor || 0) * wageRateFor(state, cid));
 }
 

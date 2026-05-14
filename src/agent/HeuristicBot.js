@@ -60,7 +60,6 @@ export class HeuristicBot {
     if (obs.player.cash > MIN_CASH_TO_PLANT) {
       for (const t of obs.player.tilesOwned) {
         if (t.countryId !== PLAYER_COUNTRY_ID) continue;
-        if (t.lockType === 'mining') continue;
         if (t.state !== 'fallow' && t.state !== 'cosechado' && t.state !== 'plowed') continue;
         // pick the food producible with best 30d MA per cycle-day proxy
         let best = null, bestScore = -Infinity;

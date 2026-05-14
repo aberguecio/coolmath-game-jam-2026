@@ -1,9 +1,9 @@
-// Single registry for everything that flows through the economy: raw farm/mine output AND
+// Single registry for everything that flows through the economy: raw farm output AND
 // processed industry output. Adding a producible = one entry; no code changes elsewhere.
 //
 // Schema:
 //   id, name, color
-//   category         'annual_crop' | 'perennial_crop' | 'mining' | 'processed'
+//   category         'annual_crop' | 'perennial_crop' | 'processed'
 //   commodityType    'food' | 'material' (drives population consumption rules)
 //   processStage     'raw' | 'processed' | 'final'
 //   nutritionUnits   (food only) caloric value per unit; 0 for materials
@@ -18,7 +18,6 @@
 //   Production cost (paid by owner → wageFund, replaces the old wagePortion routing):
 //     harvestCost     (annual & perennial crops) — labor cost per harvest event,
 //                      only charged when autoHarvest fires (auto-mode tile)
-//     monthlyOpCost   (mining) — operating labor cost charged monthly while operational
 //
 //   market           { basePrice, ...optional overrides }
 
@@ -102,61 +101,6 @@ export const PRODUCIBLES = {
     perennial: { regrowDays: 365, lifespanDays: 365 * 10 },
     consumption: { nutritionWeight: 0.5 },
     market: { basePrice: 220 },
-  },
-
-  // === RAW MINERALS (material) ==================================================
-  copper: {
-    id: 'copper', name: 'Copper', color: 0xc97f3a,
-    category: 'mining',
-    commodityType: 'material', processStage: 'raw',
-    nutritionUnits: 0,
-    actionVerb: 'Mine',
-    setupLabor: 80, requiresPlow: false,
-    monthlyLabor: 1,                      // workers × wageRate = monthly op cost
-    growthDays: 270,
-    growthCurve: { base: 0.8, qualitySlope: 0.4 },
-    yieldUnits: 2,
-    yieldCurve: { base: 0.4, qualitySlope: 1.0 },
-    perennial: { regrowDays: 30, lifespanDays: 365 * 30 },
-    consumption: { nutritionWeight: 0.0 },
-    market: { basePrice: 250 },
-    patches: { count: 2, sizePerPatch: 12, richness: { min: 0.4, max: 0.9 } },
-  },
-
-  iron: {
-    id: 'iron', name: 'Iron', color: 0x6e6e75,
-    category: 'mining',
-    commodityType: 'material', processStage: 'raw',
-    nutritionUnits: 0,
-    actionVerb: 'Mine',
-    setupLabor: 50, requiresPlow: false,
-    monthlyLabor: 1,
-    growthDays: 180,
-    growthCurve: { base: 0.85, qualitySlope: 0.3 },
-    yieldUnits: 3,
-    yieldCurve: { base: 0.5, qualitySlope: 0.8 },
-    perennial: { regrowDays: 30, lifespanDays: 365 * 40 },
-    consumption: { nutritionWeight: 0.0 },
-    market: { basePrice: 90 },
-    patches: { count: 3, sizePerPatch: 12, richness: { min: 0.5, max: 1.0 } },
-  },
-
-  gold: {
-    id: 'gold', name: 'Gold', color: 0xffd942,
-    category: 'mining',
-    commodityType: 'material', processStage: 'raw',
-    nutritionUnits: 0,
-    actionVerb: 'Mine',
-    setupLabor: 180, requiresPlow: false,
-    monthlyLabor: 1,
-    growthDays: 365,
-    growthCurve: { base: 0.5, qualitySlope: 0.9 },
-    yieldUnits: 2,
-    yieldCurve: { base: 0.5, qualitySlope: 0.8 },
-    perennial: { regrowDays: 30, lifespanDays: 365 * 50 },
-    consumption: { nutritionWeight: 0.0 },
-    market: { basePrice: 600 },
-    patches: { count: 1, sizePerPatch: 12, richness: { min: 0.3, max: 1.0 } },
   },
 
 };

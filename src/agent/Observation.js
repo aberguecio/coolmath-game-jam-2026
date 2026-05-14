@@ -130,9 +130,6 @@ function listPlayerTiles(state) {
         state: t.state, lockType: t.lockType,
         crop: t.crop, growth: t.growth, ageDays: t.ageDays,
         autoMode: t.autoMode, autoReplant: t.autoReplant,
-        miningStatus: t.miningStatus,
-        surveyed: t.surveyed,
-        minerals: t.surveyed ? { ...t.minerals } : null,
         quality: round3(t.quality ?? 0),
       });
     }

@@ -10,7 +10,7 @@
 //   3. apply cada acción
 //   4. advance one day (Clock-equivalente)
 //   5. tickEvents → Farming → Industries → Market → Population → AI
-//      → Exporters (+ AI exporter shipments) → (monthly) salaries, mining ops,
+//      → Exporters (+ AI exporter shipments) → (monthly) salaries,
 //      storage, labor, loans, fiscalCrisis, AI monthly → (yearly) city, countries
 //   6. drain fxQueue (no-op consumer headless)
 //   7. onTick callback (TraceLog enchufa acá)
@@ -26,7 +26,6 @@ import { tickMarket, populationSpend, tickCountriesYearly } from '../systems/Mar
 import { tickAI, tickAIWeekly, tickAIMonthly } from '../systems/AI.js';
 import { tickExporters } from '../systems/Exporters.js';
 import { aiExporterTryShipment } from '../systems/ExporterAI.js';
-import { tickMiningOps } from '../systems/Mining.js';
 import { tickStorageCost } from '../systems/Storage.js';
 import { tickLaborMarket } from '../systems/Labor.js';
 import { tickLoans } from '../systems/Bank.js';
@@ -72,7 +71,6 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
       if (state.time.totalDays % 7 === 0) tickAIWeekly(state);
     }
     if (events.month) {
-      tickMiningOps(state);
       tickStorageCost(state);
       tickLaborMarket(state);
       tickLoans(state);
