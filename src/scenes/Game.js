@@ -121,7 +121,6 @@ export class Game extends Phaser.Scene {
     this.buildOfferModal();
     this.buildMarketModal();
     this.buildPriceChartModal();
-    this.buildStockChartModal();
     this.buildEventsModal();
     this.buildCompaniesModal();
     this.buildTutorialOverlay();
@@ -146,7 +145,6 @@ export class Game extends Phaser.Scene {
     this.input.keyboard.on('keydown-ESC', () => {
       if (this.state.ui.offerOpen) { this.closeOfferModal(); return; }
       if (this.state.ui.priceChartOpen) { this.togglePriceChart(false); return; }
-      if (this.state.ui.stockChartOpen) { this.toggleStockChart(false); return; }
       if (this.state.ui.marketOpen) { this.toggleMarket(false); return; }
       if (this.state.ui.eventsOpen) { this.toggleEvents(false); return; }
       if (this.state.ui.companiesOpen) { this.toggleCompanies(false); return; }
@@ -1600,7 +1598,6 @@ export class Game extends Phaser.Scene {
     if (this.state.ui.offerOpen) this.refreshOfferModal();
     if (this.state.ui.marketOpen) this.refreshMarketModal();
     if (this.state.ui.priceChartOpen) this.refreshPriceChartModal();
-    if (this.state.ui.stockChartOpen) this.refreshStockChartModal();
     if (this.state.ui.eventsOpen) this.refreshEventsModal();
     if (this.state.ui.companiesOpen) this.refreshCompaniesModal();
     this.refreshTutorial();
@@ -1822,26 +1819,6 @@ export class Game extends Phaser.Scene {
       this.marketGroup.add(sparkHit);
       this.marketDynamicNodes.push(sparkHit);
 
-      // 📦 stock chart icon — small overlay at the top-right corner of the
-      // sparkline. Sits above sparkHit so its click opens the stock view
-      // without triggering the price chart.
-      const stockIconW = 20, stockIconH = 16;
-      const stockIconX = sparkX + sparkW - stockIconW - 2;
-      const stockIconY = sparkY + 2;
-      const stockIconBg = this.add.rectangle(stockIconX, stockIconY, stockIconW, stockIconH, 0x1a2530, 0.85)
-        .setOrigin(0, 0).setDepth(59).setInteractive({ useHandCursor: true });
-      const stockIconTxt = this.add.text(stockIconX + stockIconW / 2, stockIconY + stockIconH / 2, '📦', {
-        fontFamily: 'monospace', fontSize: '11px',
-      }).setOrigin(0.5).setDepth(60);
-      stockIconBg.on('pointerover', () => stockIconBg.setFillStyle(0x6ee7b7, 0.4));
-      stockIconBg.on('pointerout', () => stockIconBg.setFillStyle(0x1a2530, 0.85));
-      stockIconBg.on('pointerdown', (pointer, lx, ly, evt) => {
-        if (evt) evt.stopPropagation();
-        this.openStockChartFor(def.id, cid);
-      });
-      this.marketGroup.add(stockIconBg); this.marketGroup.add(stockIconTxt);
-      this.marketDynamicNodes.push(stockIconBg, stockIconTxt);
-
       const stock = Math.round(s.market.inventory?.[cid]?.[def.id] || 0);
       const offMkt = this.offMarketInventoryFor(s, cid, def.id);
       // Per-country inventory: player only sees what they hold IN THIS town.
@@ -2052,13 +2029,15 @@ export class Game extends Phaser.Scene {
     this.priceChartDynamic = [];
   }
 
-  // Called from the Market modal sparkline. Locks producible+country and opens
-  // the chart. Doesn't close the Market modal — uses higher depth so it overlays.
+  // Called from the Market modal sparkline. Locks producible+country y abre
+  // el chart unificado. Modos: 'price' | 'stocks' | 'flows' cambiables desde
+  // botones en la parte superior del modal.
   openPriceChartFor(pid, cid) {
     const s = this.state;
     s.ui.priceChartPid = pid;
     s.ui.priceChartCid = cid;
-    if (!s.ui.priceChartDays) s.ui.priceChartDays = 90;     // default: 3 months
+    if (!s.ui.priceChartDays) s.ui.priceChartDays = 90;
+    if (!s.ui.priceChartMode) s.ui.priceChartMode = 'price';
     this.togglePriceChart(true);
   }
 
@@ -2072,6 +2051,12 @@ export class Game extends Phaser.Scene {
     this.refreshTopBar();
   }
 
+  // Renders el chart con uno de 3 modos:
+  //   'price'  — price line del history
+  //   'stocks' — marketStock + offMarketStock del snapshot
+  //   'flows'  — supplyDay + consumptionDay del snapshot
+  // Los 3 modos comparten layout (date pills, plot area, axis grid). La diferencia
+  // está en la fuente de datos, las series, las stats y el formato de los Y labels.
   refreshPriceChartModal() {
     const s = this.state;
     const pid = s.ui.priceChartPid;
@@ -2079,38 +2064,82 @@ export class Game extends Phaser.Scene {
     if (!pid || !cid) return;
     const def = PRODUCIBLES[pid];
     if (!def) return;
-    const history = s.market.history?.[cid]?.[pid] || [];
+    const mode = s.ui.priceChartMode || 'price';
 
     for (const n of this.priceChartDynamic) n.destroy();
     this.priceChartDynamic = [];
     this.priceChartGfx.clear();
 
-    const { x, y, w, h, contentTop, contentBottom } = this.priceChartFrame;
+    const { x, w, contentTop, contentBottom } = this.priceChartFrame;
 
-    // Update title text to include producible + country.
+    // ---- Modo-config: data source + series + value extractor + stats ----
+    const valueOf = (rec, ser) => ser.key === null ? rec : (rec[ser.key] || 0);
+    let samplesRaw, series, statsFn, yUnit, titleIcon;
+    if (mode === 'price') {
+      samplesRaw = (s.market.history?.[cid]?.[pid] || []).slice();
+      series = [{ key: null, label: 'Price', color: def.color }];
+      yUnit = '$'; titleIcon = '📊';
+      statsFn = (smp) => {
+        const minV = Math.min(...smp);
+        const maxV = Math.max(...smp);
+        const first = smp[0];
+        const last = smp[smp.length - 1];
+        const pct = first > 0 ? ((last - first) / first) * 100 : 0;
+        return {
+          line: `Current $${last.toFixed(2)}   ·   min $${minV.toFixed(2)}   ·   max $${maxV.toFixed(2)}   ·   ${smp.length}d`,
+          pctStr: `Δ ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`,
+          pctColor: pct > 1 ? '#6ee79a' : pct < -1 ? '#ff7a7a' : '#cdd6df',
+        };
+      };
+    } else if (mode === 'stocks') {
+      samplesRaw = (s.market.snapshot?.[cid]?.[pid] || []).slice();
+      series = [
+        { key: 'marketStock',    label: 'Market',     color: 0x6ee7b7 },
+        { key: 'offMarketStock', label: 'Off-market', color: 0x7a8694 },
+      ];
+      yUnit = 'u'; titleIcon = '📦';
+      statsFn = (smp) => {
+        const lr = smp[smp.length - 1];
+        const mk = Math.round(lr.marketStock || 0);
+        const off = Math.round(lr.offMarketStock || 0);
+        const tot = mk + off;
+        const pct = tot > 0 ? Math.round((mk / tot) * 100) : 0;
+        return { line: `Market ${mk}u   ·   Off-market ${off}u   ·   In-góndola ${pct}%   ·   ${smp.length}d` };
+      };
+    } else { // flows
+      samplesRaw = (s.market.snapshot?.[cid]?.[pid] || []).slice();
+      series = [
+        { key: 'supplyDay',      label: 'Supply',      color: 0x60b3ff },
+        { key: 'consumptionDay', label: 'Consumption', color: 0xff6b6b },
+      ];
+      yUnit = 'u'; titleIcon = '📉';
+      statsFn = (smp) => {
+        const last30 = smp.slice(-30);
+        const sumSup = last30.reduce((a, r) => a + (r.supplyDay || 0), 0);
+        const sumCons = last30.reduce((a, r) => a + (r.consumptionDay || 0), 0);
+        const net = sumSup - sumCons;
+        return { line: `30d supply ${sumSup}u   ·   30d consumption ${sumCons}u   ·   Net ${net >= 0 ? '+' : ''}${net}u   ·   ${smp.length}d` };
+      };
+    }
+
     this.priceChartFrame.group.list[2].setText(
-      `📊  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`,
+      `${titleIcon}  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`,
     );
 
-    // ---- Date filter pills ----
-    const days = s.ui.priceChartDays || 90;
-    const ranges = [
-      { label: '1M',  days: 30 },
-      { label: '3M',  days: 90 },
-      { label: '6M',  days: 180 },
-      { label: '1Y',  days: 365 },
-      { label: '3Y',  days: 365 * 3 },
-      { label: '5Y',  days: 365 * 5 },
-      { label: 'All', days: Infinity },
+    // ---- Mode toggle (3 botones) + Date pills en la misma fila ----
+    const toggleY = contentTop;
+    const modes = [
+      { id: 'price',  label: 'Price'  },
+      { id: 'stocks', label: 'Stocks' },
+      { id: 'flows',  label: 'Flows'  },
     ];
-    const pillsY = contentTop;
-    let pillX = x + 18;
-    for (const r of ranges) {
-      const active = days === r.days;
-      const bg = this.add.rectangle(pillX, pillsY, 50, 22,
+    let tgX = x + 18;
+    for (const m of modes) {
+      const active = mode === m.id;
+      const bg = this.add.rectangle(tgX, toggleY, 60, 22,
         active ? 0xffb347 : 0x243345).setOrigin(0, 0).setDepth(63)
         .setInteractive({ useHandCursor: true });
-      const txt = this.add.text(pillX + 25, pillsY + 11, r.label, {
+      const txt = this.add.text(tgX + 30, toggleY + 11, m.label, {
         fontFamily: 'monospace', fontSize: '11px',
         color: active ? '#0f1923' : '#cdd6df',
         fontStyle: active ? 'bold' : 'normal',
@@ -2118,229 +2147,15 @@ export class Game extends Phaser.Scene {
       bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
       bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
       bg.on('pointerdown', () => {
-        s.ui.priceChartDays = r.days;
+        s.ui.priceChartMode = m.id;
         this.refreshPriceChartModal();
       });
       this.priceChartFrame.group.add(bg); this.priceChartFrame.group.add(txt);
       this.priceChartDynamic.push(bg, txt);
-      pillX += 56;
+      tgX += 66;
     }
 
-    // ---- Window of samples ----
-    const samples = days === Infinity ? history.slice() : history.slice(-days);
-    if (samples.length < 2) {
-      const empty = this.add.text(x + w / 2, (contentTop + contentBottom) / 2,
-        'Not enough history yet — let some days pass.', {
-        fontFamily: 'monospace', fontSize: '12px', color: '#7a8694',
-      }).setOrigin(0.5).setDepth(63);
-      this.priceChartFrame.group.add(empty); this.priceChartDynamic.push(empty);
-      return;
-    }
-
-    // Stats
-    const minV = Math.min(...samples);
-    const maxV = Math.max(...samples);
-    const first = samples[0];
-    const last = samples[samples.length - 1];
-    const pct = first > 0 ? ((last - first) / first) * 100 : 0;
-    const pctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
-    const pctColor = pct > 1 ? '#6ee79a' : pct < -1 ? '#ff7a7a' : '#cdd6df';
-
-    const statsY = pillsY + 30;
-    const statsTxt = this.add.text(x + 18, statsY,
-      `Current $${last.toFixed(2)}   ·   Window min $${minV.toFixed(2)}   ·   max $${maxV.toFixed(2)}   ·   ${samples.length}d`, {
-        fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
-      }).setDepth(63);
-    this.priceChartFrame.group.add(statsTxt); this.priceChartDynamic.push(statsTxt);
-
-    const pctTxt = this.add.text(x + w - 18, statsY, `Δ ${pctStr}`, {
-      fontFamily: 'monospace', fontSize: '13px', color: pctColor, fontStyle: 'bold',
-    }).setOrigin(1, 0).setDepth(63);
-    this.priceChartFrame.group.add(pctTxt); this.priceChartDynamic.push(pctTxt);
-
-    // ---- Plot area ----
-    const plotLeft = x + 60;
-    const plotRight = x + w - 24;
-    const plotTop = statsY + 28;
-    const plotBottom = contentBottom - 24;
-    const plotW = plotRight - plotLeft;
-    const plotH = plotBottom - plotTop;
-
-    // Y axis grid: 4 horizontal lines
-    const range = (maxV - minV) || 1;
-    const yPad = range * 0.08;
-    const yMin = Math.max(0, minV - yPad);
-    const yMax = maxV + yPad;
-    const yRange = (yMax - yMin) || 1;
-    for (let g = 0; g <= 4; g++) {
-      const yVal = yMin + (yRange * g) / 4;
-      const py = plotBottom - ((yVal - yMin) / yRange) * plotH;
-      this.priceChartGfx.lineStyle(1, 0x3a4d63, 0.5);
-      this.priceChartGfx.lineBetween(plotLeft, py, plotRight, py);
-      const lab = this.add.text(plotLeft - 6, py, `$${yVal.toFixed(0)}`, {
-        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
-      }).setOrigin(1, 0.5).setDepth(63);
-      this.priceChartFrame.group.add(lab); this.priceChartDynamic.push(lab);
-    }
-
-    // X axis: start / end day labels
-    const daysSpan = samples.length - 1;
-    const totalDays = s.time.totalDays;
-    const startDay = totalDays - daysSpan;
-    const xStartLab = this.add.text(plotLeft, plotBottom + 6,
-      `day ${startDay}`, {
-        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
-      }).setDepth(63);
-    const xEndLab = this.add.text(plotRight, plotBottom + 6,
-      `day ${totalDays}`, {
-        fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
-      }).setOrigin(1, 0).setDepth(63);
-    this.priceChartFrame.group.add(xStartLab); this.priceChartFrame.group.add(xEndLab);
-    this.priceChartDynamic.push(xStartLab, xEndLab);
-
-    // basePrice dashed reference line
-    const base = def.market?.basePrice ?? 0;
-    if (base >= yMin && base <= yMax) {
-      const by = plotBottom - ((base - yMin) / yRange) * plotH;
-      this.priceChartGfx.lineStyle(1, 0x566370, 0.7);
-      for (let dx = 0; dx < plotW; dx += 6) {
-        this.priceChartGfx.lineBetween(plotLeft + dx, by, plotLeft + dx + 3, by);
-      }
-      const baseLab = this.add.text(plotRight + 2, by, `base $${base}`, {
-        fontFamily: 'monospace', fontSize: '8px', color: '#566370',
-      }).setOrigin(0, 0.5).setDepth(63);
-      this.priceChartFrame.group.add(baseLab); this.priceChartDynamic.push(baseLab);
-    }
-
-    // Main line — use producible color
-    this.priceChartGfx.lineStyle(2, def.color, 1);
-    this.priceChartGfx.beginPath();
-    for (let i = 0; i < samples.length; i++) {
-      const px = plotLeft + (i / (samples.length - 1)) * plotW;
-      const py = plotBottom - ((samples[i] - yMin) / yRange) * plotH;
-      if (i === 0) this.priceChartGfx.moveTo(px, py);
-      else this.priceChartGfx.lineTo(px, py);
-    }
-    this.priceChartGfx.strokePath();
-
-    // Min / max markers (small dots)
-    const markIdx = (target) => {
-      let bestI = 0;
-      for (let i = 1; i < samples.length; i++) {
-        if ((target === 'min' && samples[i] < samples[bestI])
-            || (target === 'max' && samples[i] > samples[bestI])) bestI = i;
-      }
-      return bestI;
-    };
-    for (const which of ['min', 'max']) {
-      const i = markIdx(which);
-      const px = plotLeft + (i / (samples.length - 1)) * plotW;
-      const py = plotBottom - ((samples[i] - yMin) / yRange) * plotH;
-      const color = which === 'min' ? 0xff7a7a : 0x6ee79a;
-      this.priceChartGfx.fillStyle(color, 1);
-      this.priceChartGfx.fillCircle(px, py, 3);
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // STOCK CHART MODAL — clon estructural del PRICE CHART pero leyendo
-  // state.market.snapshot. Dos modos vía toggle: "Stocks" (marketStock vs
-  // offMarketStock) y "Flows" (supplyDay vs consumptionDay). Cada par tiene
-  // escalas naturalmente compatibles entre sí.
-  // -----------------------------------------------------------------------
-  buildStockChartModal() {
-    const frame = this.makeModalFrame({
-      w: 720, h: 500, title: '📦  STOCK CHART', color: 0x6ee7b7,
-      onClose: () => this.toggleStockChart(false),
-      depth: 62,                                  // above Market modal
-    });
-    this.stockChartFrame = frame;
-    this.stockChartGfx = this.add.graphics().setDepth(63);
-    frame.group.add(this.stockChartGfx);
-    this.stockChartDynamic = [];
-  }
-
-  openStockChartFor(pid, cid) {
-    const s = this.state;
-    s.ui.stockChartPid = pid;
-    s.ui.stockChartCid = cid;
-    if (!s.ui.stockChartDays) s.ui.stockChartDays = 90;
-    if (!s.ui.stockChartMode) s.ui.stockChartMode = 'stocks';
-    this.toggleStockChart(true);
-  }
-
-  toggleStockChart(open) {
-    const s = this.state;
-    if (open && !s.ui.stockChartOpen) this.enterModal();
-    else if (!open && s.ui.stockChartOpen) this.exitModal();
-    s.ui.stockChartOpen = open;
-    this.stockChartFrame.group.setVisible(open);
-    if (open) this.refreshStockChartModal();
-    this.refreshTopBar();
-  }
-
-  refreshStockChartModal() {
-    const s = this.state;
-    const pid = s.ui.stockChartPid;
-    const cid = s.ui.stockChartCid;
-    if (!pid || !cid) return;
-    const def = PRODUCIBLES[pid];
-    if (!def) return;
-    const snapshot = s.market.snapshot?.[cid]?.[pid] || [];
-
-    for (const n of this.stockChartDynamic) n.destroy();
-    this.stockChartDynamic = [];
-    this.stockChartGfx.clear();
-
-    const { x, y, w, h, contentTop, contentBottom } = this.stockChartFrame;
-
-    this.stockChartFrame.group.list[2].setText(
-      `📦  ${def.name} — ${COUNTRIES[cid]?.name ?? cid}`,
-    );
-
-    const mode = s.ui.stockChartMode || 'stocks';
-    const seriesByMode = {
-      stocks: [
-        { key: 'marketStock',    label: 'Market',     color: 0x6ee7b7 },
-        { key: 'offMarketStock', label: 'Off-market', color: 0x7a8694 },
-      ],
-      flows: [
-        { key: 'supplyDay',      label: 'Supply',      color: 0x60b3ff },
-        { key: 'consumptionDay', label: 'Consumption', color: 0xff6b6b },
-      ],
-    };
-    const series = seriesByMode[mode];
-
-    // ---- Toggle Stocks / Flows ----
-    const toggleY = contentTop;
-    const toggleOpts = [
-      { id: 'stocks', label: 'Stocks' },
-      { id: 'flows',  label: 'Flows' },
-    ];
-    let tgX = x + 18;
-    for (const opt of toggleOpts) {
-      const active = mode === opt.id;
-      const bg = this.add.rectangle(tgX, toggleY, 70, 22,
-        active ? 0x6ee7b7 : 0x243345).setOrigin(0, 0).setDepth(63)
-        .setInteractive({ useHandCursor: true });
-      const txt = this.add.text(tgX + 35, toggleY + 11, opt.label, {
-        fontFamily: 'monospace', fontSize: '11px',
-        color: active ? '#0f1923' : '#cdd6df',
-        fontStyle: active ? 'bold' : 'normal',
-      }).setOrigin(0.5).setDepth(64);
-      bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
-      bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
-      bg.on('pointerdown', () => {
-        s.ui.stockChartMode = opt.id;
-        this.refreshStockChartModal();
-      });
-      this.stockChartFrame.group.add(bg); this.stockChartFrame.group.add(txt);
-      this.stockChartDynamic.push(bg, txt);
-      tgX += 76;
-    }
-
-    // ---- Date filter pills (right side of toggle row) ----
-    const days = s.ui.stockChartDays || 90;
+    const days = s.ui.priceChartDays || 90;
     const ranges = [
       { label: '1M',  days: 30 },
       { label: '3M',  days: 90 },
@@ -2353,10 +2168,10 @@ export class Game extends Phaser.Scene {
     let pillX = tgX + 16;
     for (const r of ranges) {
       const active = days === r.days;
-      const bg = this.add.rectangle(pillX, toggleY, 48, 22,
-        active ? 0xffb347 : 0x243345).setOrigin(0, 0).setDepth(63)
+      const bg = this.add.rectangle(pillX, toggleY, 44, 22,
+        active ? 0x6ee7b7 : 0x243345).setOrigin(0, 0).setDepth(63)
         .setInteractive({ useHandCursor: true });
-      const txt = this.add.text(pillX + 24, toggleY + 11, r.label, {
+      const txt = this.add.text(pillX + 22, toggleY + 11, r.label, {
         fontFamily: 'monospace', fontSize: '10px',
         color: active ? '#0f1923' : '#cdd6df',
         fontStyle: active ? 'bold' : 'normal',
@@ -2364,47 +2179,38 @@ export class Game extends Phaser.Scene {
       bg.on('pointerover', () => { if (!active) bg.setFillStyle(0x3a4d63); });
       bg.on('pointerout', () => { if (!active) bg.setFillStyle(0x243345); });
       bg.on('pointerdown', () => {
-        s.ui.stockChartDays = r.days;
-        this.refreshStockChartModal();
+        s.ui.priceChartDays = r.days;
+        this.refreshPriceChartModal();
       });
-      this.stockChartFrame.group.add(bg); this.stockChartFrame.group.add(txt);
-      this.stockChartDynamic.push(bg, txt);
-      pillX += 52;
+      this.priceChartFrame.group.add(bg); this.priceChartFrame.group.add(txt);
+      this.priceChartDynamic.push(bg, txt);
+      pillX += 48;
     }
 
-    // ---- Window of samples ----
-    const samples = days === Infinity ? snapshot.slice() : snapshot.slice(-days);
+    // ---- Window slice ----
+    const samples = days === Infinity ? samplesRaw : samplesRaw.slice(-days);
     if (samples.length < 2) {
       const empty = this.add.text(x + w / 2, (contentTop + contentBottom) / 2,
         'Not enough history yet — let some days pass.', {
         fontFamily: 'monospace', fontSize: '12px', color: '#7a8694',
       }).setOrigin(0.5).setDepth(63);
-      this.stockChartFrame.group.add(empty); this.stockChartDynamic.push(empty);
+      this.priceChartFrame.group.add(empty); this.priceChartDynamic.push(empty);
       return;
     }
 
-    // ---- Stats row (depende del mode) ----
-    const lastRec = samples[samples.length - 1];
+    // ---- Stats row ----
     const statsY = toggleY + 30;
-    let statsLine;
-    if (mode === 'stocks') {
-      const mk = lastRec.marketStock || 0;
-      const off = lastRec.offMarketStock || 0;
-      const tot = mk + off;
-      const pct = tot > 0 ? Math.round((mk / tot) * 100) : 0;
-      statsLine = `Market ${mk}u   ·   Off-market ${off}u   ·   In-góndola ratio ${pct}%   ·   ${samples.length}d`;
-    } else {
-      const last30 = samples.slice(-30);
-      const sumSup = last30.reduce((s, r) => s + (r.supplyDay || 0), 0);
-      const sumCons = last30.reduce((s, r) => s + (r.consumptionDay || 0), 0);
-      const net = sumSup - sumCons;
-      const netStr = `${net >= 0 ? '+' : ''}${net}u`;
-      statsLine = `30d supply ${sumSup}u   ·   30d consumption ${sumCons}u   ·   Net ${netStr}   ·   ${samples.length}d`;
-    }
-    const statsTxt = this.add.text(x + 18, statsY, statsLine, {
+    const stats = statsFn(samples);
+    const statsTxt = this.add.text(x + 18, statsY, stats.line, {
       fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
     }).setDepth(63);
-    this.stockChartFrame.group.add(statsTxt); this.stockChartDynamic.push(statsTxt);
+    this.priceChartFrame.group.add(statsTxt); this.priceChartDynamic.push(statsTxt);
+    if (stats.pctStr) {
+      const pctTxt = this.add.text(x + w - 18, statsY, stats.pctStr, {
+        fontFamily: 'monospace', fontSize: '13px', color: stats.pctColor, fontStyle: 'bold',
+      }).setOrigin(1, 0).setDepth(63);
+      this.priceChartFrame.group.add(pctTxt); this.priceChartDynamic.push(pctTxt);
+    }
 
     // ---- Plot area ----
     const plotLeft = x + 60;
@@ -2414,86 +2220,111 @@ export class Game extends Phaser.Scene {
     const plotW = plotRight - plotLeft;
     const plotH = plotBottom - plotTop;
 
-    // Calcular min/max sobre AMBAS series del modo activo (escala compartida)
+    // Min/max sobre todas las series del modo activo (escala compartida)
     let minV = Infinity, maxV = -Infinity;
     for (const rec of samples) {
       for (const ser of series) {
-        const v = rec[ser.key] || 0;
+        const v = valueOf(rec, ser);
         if (v < minV) minV = v;
         if (v > maxV) maxV = v;
       }
     }
     if (!isFinite(minV)) { minV = 0; maxV = 1; }
     if (maxV === minV) maxV = minV + 1;
-
-    // Y axis grid + labels
-    const range = (maxV - minV) || 1;
+    const range = maxV - minV;
     const yPad = range * 0.08;
     const yMin = Math.max(0, minV - yPad);
     const yMax = maxV + yPad;
     const yRange = (yMax - yMin) || 1;
+
+    // Y axis grid + labels
     for (let g = 0; g <= 4; g++) {
       const yVal = yMin + (yRange * g) / 4;
       const py = plotBottom - ((yVal - yMin) / yRange) * plotH;
-      this.stockChartGfx.lineStyle(1, 0x3a4d63, 0.5);
-      this.stockChartGfx.lineBetween(plotLeft, py, plotRight, py);
-      const lab = this.add.text(plotLeft - 6, py, `${Math.round(yVal)}u`, {
+      this.priceChartGfx.lineStyle(1, 0x3a4d63, 0.5);
+      this.priceChartGfx.lineBetween(plotLeft, py, plotRight, py);
+      const labText = yUnit === '$' ? `$${yVal.toFixed(0)}` : `${Math.round(yVal)}u`;
+      const lab = this.add.text(plotLeft - 6, py, labText, {
         fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
       }).setOrigin(1, 0.5).setDepth(63);
-      this.stockChartFrame.group.add(lab); this.stockChartDynamic.push(lab);
+      this.priceChartFrame.group.add(lab); this.priceChartDynamic.push(lab);
     }
 
-    // X axis labels
-    const startDay = samples[0].day;
-    const endDay = samples[samples.length - 1].day;
+    // X axis labels — price usa el clock relativo; stocks/flows usan record.day
+    let startDay, endDay;
+    if (mode === 'price') {
+      const daysSpan = samples.length - 1;
+      endDay = s.time.totalDays;
+      startDay = endDay - daysSpan;
+    } else {
+      startDay = samples[0].day;
+      endDay = samples[samples.length - 1].day;
+    }
     const xStartLab = this.add.text(plotLeft, plotBottom + 6, `day ${startDay}`, {
       fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
     }).setDepth(63);
     const xEndLab = this.add.text(plotRight, plotBottom + 6, `day ${endDay}`, {
       fontFamily: 'monospace', fontSize: '9px', color: '#7a8694',
     }).setOrigin(1, 0).setDepth(63);
-    this.stockChartFrame.group.add(xStartLab); this.stockChartFrame.group.add(xEndLab);
-    this.stockChartDynamic.push(xStartLab, xEndLab);
+    this.priceChartFrame.group.add(xStartLab); this.priceChartFrame.group.add(xEndLab);
+    this.priceChartDynamic.push(xStartLab, xEndLab);
 
-    // Líneas de las 2 series + legend
+    // basePrice dashed reference (sólo modo price)
+    if (mode === 'price') {
+      const base = def.market?.basePrice ?? 0;
+      if (base >= yMin && base <= yMax) {
+        const by = plotBottom - ((base - yMin) / yRange) * plotH;
+        this.priceChartGfx.lineStyle(1, 0x566370, 0.7);
+        for (let dx = 0; dx < plotW; dx += 6) {
+          this.priceChartGfx.lineBetween(plotLeft + dx, by, plotLeft + dx + 3, by);
+        }
+        const baseLab = this.add.text(plotRight + 2, by, `base $${base}`, {
+          fontFamily: 'monospace', fontSize: '8px', color: '#566370',
+        }).setOrigin(0, 0.5).setDepth(63);
+        this.priceChartFrame.group.add(baseLab); this.priceChartDynamic.push(baseLab);
+      }
+    }
+
+    // ---- Líneas de las series + legend (legend sólo si >1 serie) ----
     let legendX = plotRight - 10;
     for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
       const ser = series[sIdx];
-      this.stockChartGfx.lineStyle(2, ser.color, 1);
-      this.stockChartGfx.beginPath();
+      this.priceChartGfx.lineStyle(2, ser.color, 1);
+      this.priceChartGfx.beginPath();
       for (let i = 0; i < samples.length; i++) {
         const px = plotLeft + (i / (samples.length - 1)) * plotW;
-        const py = plotBottom - (((samples[i][ser.key] || 0) - yMin) / yRange) * plotH;
-        if (i === 0) this.stockChartGfx.moveTo(px, py);
-        else this.stockChartGfx.lineTo(px, py);
+        const py = plotBottom - ((valueOf(samples[i], ser) - yMin) / yRange) * plotH;
+        if (i === 0) this.priceChartGfx.moveTo(px, py);
+        else this.priceChartGfx.lineTo(px, py);
       }
-      this.stockChartGfx.strokePath();
-      // Legend entry (right-aligned, top)
-      const labW = ser.label.length * 7 + 16;
-      const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color)
-        .setOrigin(1, 0).setDepth(63);
-      const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
-        fontFamily: 'monospace', fontSize: '10px',
-        color: '#' + ser.color.toString(16).padStart(6, '0'),
-      }).setOrigin(0, 0).setDepth(63);
-      this.stockChartFrame.group.add(sq); this.stockChartFrame.group.add(lab);
-      this.stockChartDynamic.push(sq, lab);
-      legendX -= (labW + 14);
+      this.priceChartGfx.strokePath();
+      if (series.length >= 2) {
+        const labW = ser.label.length * 7 + 16;
+        const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color)
+          .setOrigin(1, 0).setDepth(63);
+        const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
+          fontFamily: 'monospace', fontSize: '10px',
+          color: '#' + ser.color.toString(16).padStart(6, '0'),
+        }).setOrigin(0, 0).setDepth(63);
+        this.priceChartFrame.group.add(sq); this.priceChartFrame.group.add(lab);
+        this.priceChartDynamic.push(sq, lab);
+        legendX -= (labW + 14);
+      }
     }
 
-    // Min/max markers — solo en mode 'stocks' (flows son ruidosos)
-    if (mode === 'stocks') {
+    // Min/max markers — price + stocks (flows son ruidosos, marker poco útil)
+    if (mode === 'price' || mode === 'stocks') {
       for (const ser of series) {
         let minI = 0, maxI = 0;
         for (let i = 1; i < samples.length; i++) {
-          if ((samples[i][ser.key] || 0) < (samples[minI][ser.key] || 0)) minI = i;
-          if ((samples[i][ser.key] || 0) > (samples[maxI][ser.key] || 0)) maxI = i;
+          if (valueOf(samples[i], ser) < valueOf(samples[minI], ser)) minI = i;
+          if (valueOf(samples[i], ser) > valueOf(samples[maxI], ser)) maxI = i;
         }
         for (const [idx, color] of [[minI, 0xff7a7a], [maxI, 0x6ee79a]]) {
           const px = plotLeft + (idx / (samples.length - 1)) * plotW;
-          const py = plotBottom - (((samples[idx][ser.key] || 0) - yMin) / yRange) * plotH;
-          this.stockChartGfx.fillStyle(color, 1);
-          this.stockChartGfx.fillCircle(px, py, 3);
+          const py = plotBottom - ((valueOf(samples[idx], ser) - yMin) / yRange) * plotH;
+          this.priceChartGfx.fillStyle(color, 1);
+          this.priceChartGfx.fillCircle(px, py, 3);
         }
       }
     }
