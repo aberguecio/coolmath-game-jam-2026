@@ -165,19 +165,44 @@ export function initMarket(state) {
     }
   }
   recomputeTargetStocks(state);
-  // Inventory inicial: SOLO para crops (agricultura es la única producción
-  // activa al día 0). Mineras e industrias parten sin stock — sus mercados
-  // arrancan vacíos y se llenan cuando alguien construye una mina/fábrica
-  // y empieza a vender. Esto da una transición limpia desde "economía agraria"
-  // hacia industrialización.
+  // Inventory inicial: la góndola arranca con suficiente comida para que la
+  // población sobreviva 1 MES completo aunque la producción agraria todavía
+  // no haya rendido nada. Sin esto, los crops tardan 35-90+ días en madurar
+  // y la población pasa hambre durante semanas hasta la primera cosecha.
+  //
+  // Reparto: el total de nutrición necesaria (pop × nutritionPerCapita × 30)
+  // se distribuye entre los foods proporcional a la preferencia del país,
+  // luego se convierte a unidades dividiendo por nutritionUnits de cada food.
+  //
+  // Mineras e industrias parten en 0 — sus góndolas se llenan cuando alguien
+  // construye una mina/fábrica y empieza a vender.
   for (const cid of COUNTRY_IDS) {
+    const reg = COUNTRIES[cid];
+    const c = state.countries[cid];
+    const prefs = reg?.preferences || {};
+    let prefSum = 0;
     for (const pid of PRODUCIBLE_IDS) {
       const def = PRODUCIBLES[pid];
-      // Solo crops (annual + perennial fruit/tree) arrancan con stock. Mining
-      // y processed (industriales) parten en 0 — sus mercados se llenan cuando
-      // alguien construye minas/fábricas y empieza a vender.
-      const isCrop = def?.category === 'annual_crop' || def?.category === 'perennial_crop';
-      m.inventory[cid][pid] = isCrop ? (state.market.targetStock[cid][pid] ?? 50) : 0;
+      if (def?.commodityType !== 'food') continue;
+      if ((PRODUCIBLES[pid]?.nutritionUnits || 0) <= 0) continue;
+      if ((prefs[pid] || 0) > 0) prefSum += prefs[pid];
+    }
+    const survivalNutritionMonth = c.population * WAGES.nutritionPerCapita * 30;
+
+    for (const pid of PRODUCIBLE_IDS) {
+      const def = PRODUCIBLES[pid];
+      const isFoodWithPref = def?.commodityType === 'food' &&
+                              (def?.nutritionUnits || 0) > 0 &&
+                              (prefs[pid] || 0) > 0;
+      if (isFoodWithPref && prefSum > 0) {
+        const share = prefs[pid] / prefSum;
+        const nutritionForThisFood = survivalNutritionMonth * share;
+        const units = nutritionForThisFood / def.nutritionUnits;
+        m.inventory[cid][pid] = Math.round(units);
+      } else {
+        // Minerales, industriales, foods sin preferencia → góndola vacía.
+        m.inventory[cid][pid] = 0;
+      }
     }
   }
 }
