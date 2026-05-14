@@ -381,6 +381,12 @@ export class Game extends Phaser.Scene {
 
     const place = (w) => { cursor -= (w + GAP); return cursor; };
 
+    // CITY — abre el Country Chart con info demográfica, food basket,
+    // supply/demand flows, priceIndex, wage de la ciudad home.
+    const cityX = place(ICON_W);
+    this.cityBtn = this.makeIconButton(cityX, ICON_W, '🏘', 0x6ee7b7, 0x9af0d2,
+      () => this.openCountryChart(PLAYER_COUNTRY_ID), 'City stats');
+
     // BANK
     const bankX = place(ICON_W);
     this.bankBtn = this.makeIconButton(bankX, ICON_W, '🏦', 0x6ee7b7, 0x9af0d2,
