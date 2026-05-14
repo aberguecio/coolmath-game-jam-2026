@@ -9,7 +9,7 @@
 // `boomFactor` multiplier on its sale price (speculation), capped at `maxBoom`.
 
 import { PRODUCIBLE_LIST, PRODUCIBLES } from '../data/producibles.js';
-import { MINERALS, MAP, FISCAL_CRISIS, INDUSTRY } from '../data/tunables.js';
+import { MINERALS, MAP, FISCAL_CRISIS } from '../data/tunables.js';
 import { CITY } from '../data/tunables.js';
 import { COUNTRY_IDS } from '../data/countries.js';
 import { pushLog, pushFx } from '../state/GameState.js';
@@ -210,7 +210,6 @@ export function tickMiningOps(state) {
     const haircut = country.fiscalCrisis?.active ? FISCAL_CRISIS.wageHaircutFraction : 0;
     for (const tile of map.tiles) {
       if (!tile.crop) continue;
-      if (tile.industryId) continue;
       if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
       const def = PRODUCIBLES[tile.crop];
       if (!def || def.category !== 'mining') continue;
@@ -257,7 +256,7 @@ export function reopenMine(state, tile) {
   const def = PRODUCIBLES[tile.crop];
   if (!def || def.category !== 'mining') return { ok: false, reason: 'Not a mine' };
   if (tile.miningStatus !== 'closed') return { ok: false, reason: 'Not closed' };
-  const cost = Math.round(effectiveSetupCost(state, tile.countryId, def) * INDUSTRY.reopenCostFactor);
+  const cost = Math.round(effectiveSetupCost(state, tile.countryId, def) * 0.3); // 30% of setup = restart capital
   const wallet = walletFor(state, tile.owner);
   if (!wallet) return { ok: false, reason: 'Wallet missing' };
   if (wallet.cash < cost) return { ok: false, reason: `Need $${cost} to restart` };

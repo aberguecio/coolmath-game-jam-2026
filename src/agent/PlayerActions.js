@@ -21,9 +21,6 @@ import {
   buyTile, plowTile, plantTile, harvestTile, uprootTile, toggleAutoReplant, loteTile,
 } from '../systems/Farming.js';
 import { surveyTile, closeMine, reopenMine } from '../systems/Mining.js';
-import {
-  buildIndustry, closeIndustry, reopenIndustry,
-} from '../systems/Industries.js';
 import { applyForLoan } from '../systems/Bank.js';
 import { sellFromInventory, buyFromGlobal } from '../systems/Market.js';
 import { exporterStartShipment } from '../systems/Exporters.js';
@@ -95,23 +92,6 @@ export function actReopenMine(state, { tileId, countryId }) {
 }
 
 // =============================================================================
-// Industries
-// =============================================================================
-export function actBuildIndustry(state, { tileId, countryId, recipeId }) {
-  const tile = tileById(state, countryId, tileId);
-  if (!tile) return { ok: false, reason: 'tile not found' };
-  return buildIndustry(state, 'player', tile, recipeId);
-}
-
-export function actCloseIndustry(state, { industryId }) {
-  return closeIndustry(state, industryId);
-}
-
-export function actReopenIndustry(state, { industryId }) {
-  return reopenIndustry(state, industryId);
-}
-
-// =============================================================================
 // Market trading (player wallet only — bots use this same path)
 // =============================================================================
 export function actSellInventory(state, { producibleId, units, countryId }) {
@@ -163,9 +143,6 @@ export const ACTION_REGISTRY = {
   surveyTile: actSurveyTile,
   closeMine: actCloseMine,
   reopenMine: actReopenMine,
-  buildIndustry: actBuildIndustry,
-  closeIndustry: actCloseIndustry,
-  reopenIndustry: actReopenIndustry,
   sellInventory: actSellInventory,
   buyFromMarket: actBuyFromMarket,
   takeLoan: actTakeLoan,

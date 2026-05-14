@@ -6,7 +6,6 @@ import { initMarketSnapshot } from '../systems/MarketHistory.js';
 import { generateMineralDeposits } from '../systems/Mining.js';
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID, COUNTRIES } from '../data/countries.js';
 import { PRODUCIBLES, PRODUCIBLE_IDS } from '../data/producibles.js';
-import { INDUSTRIES } from '../data/industries.js';
 import { TAX_RATES } from '../data/taxRates.js';
 import { DISTANCES } from '../data/distances.js';
 
@@ -16,15 +15,6 @@ const TUTORIAL_LS_KEY = 'coolmath:tutorial';
 // Boot-time validation: registries must cross-reference each other consistently.
 // =============================================================================
 function validateRegistries() {
-  // Industry inputs/outputs must point to real producibles.
-  for (const ind of Object.values(INDUSTRIES)) {
-    for (const pid of Object.keys(ind.inputs || {})) {
-      if (!PRODUCIBLES[pid]) throw new Error(`Industry "${ind.id}" input "${pid}" is not in producibles.js`);
-    }
-    for (const pid of Object.keys(ind.outputs || {})) {
-      if (!PRODUCIBLES[pid]) throw new Error(`Industry "${ind.id}" output "${pid}" is not in producibles.js`);
-    }
-  }
   // Each country's taxRatesId must exist; distances must be symmetric and complete.
   for (const cid of COUNTRY_IDS) {
     const reg = COUNTRIES[cid];
@@ -104,8 +94,7 @@ function generateTilesFor(countryId, seed) {
         // revenue < cost × profitMargin. Used by AI to uproot chronically
         // unprofitable perennials even before they get harvested at a loss.
         skipStreak: 0,
-        // Industry / housing
-        industryId: null,             // industry record id placed here (if any)
+        // Housing
         developmentDay: null,         // when developed-tile was completed
       });
     }
@@ -210,7 +199,6 @@ export function createInitialState() {
     },
     countries: createCountriesState(),
     loans: [],
-    industries: [],                    // per-tile factories — populated by seedIndustries()
     selection: { tileId: null, countryId: PLAYER_COUNTRY_ID },
     log: [{ day: 0, text: 'Welcome. You own 1 plot in Home and $0. Visit the bank.' }],
     aiFarmers: [],

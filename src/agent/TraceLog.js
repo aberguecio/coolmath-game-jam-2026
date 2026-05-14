@@ -19,7 +19,6 @@ const HEADERS = [
   'cash', 'cashDelta',
   'priceIndex_home', 'wageRate_home',
   'marketPool_home', 'wageFund_home', 'treasury_home',
-  'industries_open', 'industries_closed',
   'totalEvents',
 ];
 
@@ -34,9 +33,6 @@ export function createTrace() {
     const cashDelta = lastCash == null ? 0 : (cash - lastCash);
     lastCash = cash;
 
-    const indOpen = state.industries.filter(i => i.status !== 'closed' && i.status !== 'building').length;
-    const indClosed = state.industries.filter(i => i.status === 'closed').length;
-
     const base = {
       day,
       year: state.time.year,
@@ -48,8 +44,6 @@ export function createTrace() {
       marketPool_home: home ? Math.round(home.marketPool ?? 0) : '',
       wageFund_home: home ? Math.round(home.wageFund ?? 0) : '',
       treasury_home: home ? Math.round(home.treasury ?? 0) : '',
-      industries_open: indOpen,
-      industries_closed: indClosed,
       totalEvents: state.eventHistory.length,
     };
 

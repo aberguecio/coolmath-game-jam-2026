@@ -21,9 +21,7 @@ import { bootHeadlessState, advanceOneDay } from './Boot.js';
 
 import { tickEvents } from '../systems/Events.js';
 import { tickFarming } from '../systems/Farming.js';
-import {
-  tickIndustries, tickIndustrySalaries, tickFiscalCrisis,
-} from '../systems/Industries.js';
+import { tickFiscalCrisis } from '../systems/FiscalCrisis.js';
 import { tickMarket, populationSpend, tickCountriesYearly } from '../systems/Market.js';
 import { tickAI, tickAIWeekly, tickAIMonthly } from '../systems/AI.js';
 import { tickExporters } from '../systems/Exporters.js';
@@ -62,7 +60,6 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
     if (events.day) {
       tickEvents(state);
       tickFarming(state);
-      tickIndustries(state);
       tickMarket(state);
       populationSpend(state);
       tickAI(state);
@@ -75,7 +72,6 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
       if (state.time.totalDays % 7 === 0) tickAIWeekly(state);
     }
     if (events.month) {
-      tickIndustrySalaries(state);
       tickMiningOps(state);
       tickStorageCost(state);
       tickLaborMarket(state);

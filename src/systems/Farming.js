@@ -173,7 +173,6 @@ function tickFarmingTile(state, tile) {
       tryAutoReplant(state, tile, tile.lastCrop);
     }
     if (!tile.crop) return;
-    if (tile.industryId) return;          // industry tiles aren't farmed
     if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') return;
     const def = PRODUCIBLES[tile.crop];
     if (!def) return;
@@ -372,12 +371,6 @@ export function uprootTile(state, tile) {
   if (!tile) return { ok: false, reason: 'No tile' };
   if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') {
     return { ok: false, reason: 'Not yours' };
-  }
-  // Industry: also drop the industry record (cleanup) — same logic as before.
-  if (tile.industryId) {
-    const idx = state.industries.findIndex(i => i.id === tile.industryId);
-    if (idx >= 0) state.industries.splice(idx, 1);
-    tile.industryId = null;
   }
   const lastDef = tile.crop ? PRODUCIBLES[tile.crop] : null;
   tile.crop = null;

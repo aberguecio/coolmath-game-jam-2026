@@ -131,7 +131,6 @@ function listPlayerTiles(state) {
         crop: t.crop, growth: t.growth, ageDays: t.ageDays,
         autoMode: t.autoMode, autoReplant: t.autoReplant,
         miningStatus: t.miningStatus,
-        industryId: t.industryId,
         surveyed: t.surveyed,
         minerals: t.surveyed ? { ...t.minerals } : null,
         quality: round3(t.quality ?? 0),
@@ -141,21 +140,6 @@ function listPlayerTiles(state) {
   return out;
 }
 
-function listPlayerVentures(state) {
-  const out = [];
-  // Player-owned industries are stored in state.industries with ownerId='player'.
-  for (const ind of state.industries ?? []) {
-    if (ind.ownerId !== 'player') continue;
-    out.push({
-      kind: 'industry',
-      id: ind.id,
-      tileId: ind.tileId,
-      countryId: ind.countryId,
-      recipeId: ind.recipeId,
-      status: ind.status,
-      operationalDay: ind.operationalDay,
-      lastCycleDay: ind.lastCycleDay,
-    });
-  }
-  return out;
+function listPlayerVentures(_state) {
+  return [];
 }

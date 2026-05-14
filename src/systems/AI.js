@@ -1,19 +1,13 @@
-import { AI, LAND_ACTIONS } from '../data/tunables.js';
+import { AI } from '../data/tunables.js';
 import { PRODUCIBLES, PRODUCIBLE_LIST } from '../data/producibles.js';
-import { INDUSTRIES } from '../data/industries.js';
 import { applyForLoan } from './Bank.js';
-import { tilePrice, pushLog, isHaloTile, pushAIDecision } from '../state/GameState.js';
+import { tilePrice, pushLog, pushAIDecision } from '../state/GameState.js';
 import { aiTryOffer, tickOffers } from './Trade.js';
 import { canMineHere } from './Mining.js';
 import { lockTypeForCategory } from './Farming.js';
 import {
-  buildIndustry, aiTryBuildIndustry, aiTryCloseIndustry, aiTryReopenIndustry,
-  aiTopUpIndustryInputs, aiSellIndustryOutputs,
-} from './Industries.js';
-import { priceMA } from './Market.js';
-import {
   effectiveSetupCost, effectivePlowCost, effectiveHarvestCost,
-  effectiveMonthlyOpCost, effectiveBuildCost, effectiveSalary,
+  effectiveMonthlyOpCost,
 } from './Inflation.js';
 import { plantTile, plowTile } from './Farming.js';
 import { expectedPriceAt } from './Forecast.js';
@@ -69,18 +63,13 @@ export function createAIFarmersForCountry(state, countryId) {
   return farmers;
 }
 
-// Unified venture picker: scores every plant / mine / build option this AI
-// could commit to ON THIS TILE, returns the one with the highest monthly
-// margin. Filters by lockType, halo membership, surveyed mineral, and the
-// AI's available cash. Replaces the old price-only `pickBestProducible` that
-// ignored harvest cost and ongoing labor — the AI was planting at a loss
-// because of that, driving food shortages → priceIndex spike → salary spike.
+// Unified venture picker: scores every plant / mine option this AI could commit
+// to ON THIS TILE, returns the one with the highest monthly margin. Filters by
+// lockType, surveyed mineral, and the AI's available cash.
 //
-// Margin is "expected monthly cash flow" so a $50/mo crop and a $300/mo
-// industry are directly comparable.
+// Margin is "expected monthly cash flow" so crops and mines are comparable.
 function aiPickBestVenture(state, ai, tile) {
   const cid = ai.countryId;
-  const isHalo = isHaloTile(state, tile);
   let best = null;
   let bestMargin = -Infinity;
 
@@ -124,28 +113,6 @@ function aiPickBestVenture(state, ai, tile) {
     }
   }
 
-  // === Industries (only on halo tiles, not locked to crop/mining) ===
-  if (isHalo && (!tile.lockType || tile.lockType === 'industry')) {
-    for (const recipe of Object.values(INDUSTRIES)) {
-      const buildCost = effectiveBuildCost(state, cid, recipe);
-      if (ai.cash < buildCost) continue;
-      let inputCost = 0, outputRev = 0;
-      for (const [pid, qty] of Object.entries(recipe.inputs)) {
-        inputCost += priceMA(state, pid, cid, 30) * qty;
-      }
-      for (const [pid, qty] of Object.entries(recipe.outputs)) {
-        outputRev += priceMA(state, pid, cid, 30) * qty;
-      }
-      const cyclesPerMonth = 30 / recipe.cycleDays;
-      const salary = effectiveSalary(state, cid, recipe);
-      const monthlyMargin = (outputRev - inputCost) * cyclesPerMonth - salary;
-      if (monthlyMargin > bestMargin) {
-        bestMargin = monthlyMargin;
-        best = { type: 'build', recipe, setupCost: buildCost, monthlyMargin };
-      }
-    }
-  }
-
   return best;
 }
 
@@ -155,8 +122,6 @@ function aiTryHarvestAndPlant(state, ai) {
   for (const tid of ai.ownedTileIds) {
     const tile = map.tiles[tid];
     if (!tile || tile.owner !== ai.id) continue;
-    if (tile.industryId) continue;          // industry tiles already produce
-
     if (tile.state !== 'fallow') continue;
     const choice = aiPickBestVenture(state, ai, tile);
     if (!choice) continue;
@@ -175,14 +140,6 @@ function aiTryHarvestAndPlant(state, ai) {
         pushAIDecision(state, {
           companyId: ai.id, recipeId: choice.def.id, action: 'planted',
           reason: `monthly margin ~$${Math.round(choice.monthlyMargin)}`,
-        });
-      }
-    } else if (choice.type === 'build') {
-      const r = buildIndustry(state, ai.id, tile, choice.recipe.id);
-      if (r.ok) {
-        pushAIDecision(state, {
-          companyId: ai.id, recipeId: choice.recipe.id, action: 'built',
-          reason: `monthly margin ~$${Math.round(choice.monthlyMargin)} (own tile)`,
         });
       }
     }
@@ -235,26 +192,17 @@ export function tickAI(state) {
     aiTryLoan(state, ai);
     aiTryHarvestAndPlant(state, ai);
     aiTryBuyLand(state, ai);
-    aiTryBuildIndustry(state, ai);   // ROI-driven, uses 30-day MA prices
   }
 }
 
-// Weekly hook: drip-sell harvested inventory + industry outputs. Run cada 7
-// días para que la góndola se reabastezca con más frecuencia (antes era
-// mensual, lo cual dejaba al off-market acumulándose entre rotaciones).
+// Weekly hook: drip-sell harvested inventory. Run cada 7 días para que la
+// góndola se reabastezca con más frecuencia (antes era mensual).
 export function tickAIWeekly(state) {
   for (const ai of state.aiFarmers) {
     aiTrySellInventory(state, ai);       // drip-sell harvested crops/minerals
-    aiSellIndustryOutputs(state, ai);    // industry outputs (separate flow)
   }
 }
 
-// Monthly hook: AI prunes unprofitable industries, reopens recovered ones,
-// tops up inputs. Las ventas se mudaron a tickAIWeekly.
-export function tickAIMonthly(state) {
-  for (const ai of state.aiFarmers) {
-    aiTopUpIndustryInputs(state, ai);
-    aiTryCloseIndustry(state, ai);
-    aiTryReopenIndustry(state, ai);      // recover when margin turns positive again
-  }
+// Monthly hook — kept as a no-op shell for future re-introduction.
+export function tickAIMonthly(_state) {
 }

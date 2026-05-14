@@ -57,7 +57,4 @@ console.log('countries:');
 for (const [cid, c] of Object.entries(finalObs.countries)) {
   console.log(`  ${cid}: priceIndex=${c.priceIndex}  wage=$${c.wageRate}  marketPool=$${c.marketPool}`);
 }
-const indOpen = state.industries.filter(i => i.status !== 'closed' && i.status !== 'building').length;
-const indClosed = state.industries.filter(i => i.status === 'closed').length;
-console.log(`industries: ${indOpen} open / ${indClosed} closed / ${state.industries.length} total`);
 console.log(`trace: ${outPath} (${trace.rows.length} rows)`);

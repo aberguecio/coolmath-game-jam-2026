@@ -159,32 +159,6 @@ export const PRODUCIBLES = {
     patches: { count: 1, sizePerPatch: 12, richness: { min: 0.3, max: 1.0 } },
   },
 
-  // === PROCESSED — outputs of industries ========================================
-  // No tile-grown stats; can only be created by an industry that lists this id as output.
-
-  flour: {
-    id: 'flour', name: 'Flour', color: 0xeec27a,
-    category: 'processed',
-    commodityType: 'food', processStage: 'processed',
-    nutritionUnits: 0.9,
-    market: { basePrice: 120 },
-  },
-
-  mechanicalPart: {
-    id: 'mechanicalPart', name: 'Mechanical Part', color: 0x9da0a6,
-    category: 'processed',
-    commodityType: 'material', processStage: 'processed',
-    nutritionUnits: 0,
-    market: { basePrice: 220 },
-  },
-
-  electricalPart: {
-    id: 'electricalPart', name: 'Electrical Part', color: 0xb86a3a,
-    category: 'processed',
-    commodityType: 'material', processStage: 'processed',
-    nutritionUnits: 0,
-    market: { basePrice: 380 },
-  },
 };
 
 export const PRODUCIBLE_LIST = Object.values(PRODUCIBLES);

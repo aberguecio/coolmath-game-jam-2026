@@ -208,23 +208,4 @@ export const FISCAL_CRISIS = {
 
 // Cross-country logistics. Per-pair distances + per-unit shipping fee live in distances.js.
 
-// Stock holding for processed/raw inventory in industries (overflow buffer if needed).
-export const INDUSTRY = {
-  // ROI threshold for AI to build a new industry (per month, on buildCost).
-  aiBuildRoiThreshold: 0.015,
-  // ROI threshold to reopen an existing closed industry — lower bar than fresh
-  // build because most fixed costs are sunk and reopen fee is discounted.
-  aiReopenRoiThreshold: 0.005,
-  // AI uses this many days of moving-average prices for build/close decisions.
-  aiPriceLookbackDays: 30,
-  // Shorter lookback for reopen check so recovery from saturation registers
-  // before the 30-day MA does.
-  aiReopenLookbackDays: 14,
-  // Margin lookback before AI closes an industry.
-  aiCloseMarginLookbackDays: 90,
-  // Reopening costs only this fraction of the original buildCost — facility
-  // exists, just needs restart capital. Applies to player AND AI reopens.
-  reopenCostFactor: 0.3,
-};
-
 

@@ -17,10 +17,8 @@ import {
   populationSpend, marketInventoryOf, tradeFlowVolume,
   offMarketInventoryFor,
 } from '../systems/Market.js';
-import {
-  tickIndustries, tickIndustrySalaries, tickFiscalCrisis, seedIndustries,
-} from '../systems/Industries.js';
-import { INDUSTRIES } from '../data/industries.js';
+import { tickFiscalCrisis } from '../systems/FiscalCrisis.js';
+import { seedIndustries } from '../systems/WorldSeed.js';
 import {
   tickFarming, buyTile, plowTile, plantTile, harvestTile, loteTile,
   tileFinanceQuote, expectedYield, effectiveQualityFor,
@@ -34,7 +32,7 @@ import { tickLaborMarket, wageRateFor } from '../systems/Labor.js';
 import { tickStorageCost, storageBillFor } from '../systems/Storage.js';
 import { tickExporters } from '../systems/Exporters.js';
 import { aiExporterTryShipment } from '../systems/ExporterAI.js';
-import { INDUSTRY, EXPORTERS } from '../data/tunables.js';
+import { EXPORTERS } from '../data/tunables.js';
 import {
   surveyTile, mineralRichness, canMineHere, tickMiningOps,
   closeMine, reopenMine,
@@ -351,21 +349,6 @@ export class Game extends Phaser.Scene {
         this.mineralDots.fillCircle(x0 + tilePx - 4, y0 + 3, 1.2);
       }
 
-      // Industry indicator: small filled square in the recipe's color, top-right.
-      if (tile.industryId) {
-        const ind = s.industries.find(i => i.id === tile.industryId);
-        if (ind) {
-          const status = ind.status;
-          const fillColor = status === 'building' ? 0x7a8694
-                          : status === 'closed' ? 0x4a4a4a
-                          : status === 'idle' ? 0xb27a3a
-                          : 0xeec27a;
-          this.mineralDots.fillStyle(fillColor, 0.95);
-          this.mineralDots.fillRect(x0 + tilePx - 12, y0 + tilePx - 12, 9, 9);
-          this.mineralDots.lineStyle(1, 0x000000, 0.6);
-          this.mineralDots.strokeRect(x0 + tilePx - 12, y0 + tilePx - 12, 9, 9);
-        }
-      }
       if (!tile.surveyed) continue;
       const minerals = [];
       for (const def of PRODUCIBLE_LIST) {
@@ -644,32 +627,7 @@ export class Game extends Phaser.Scene {
         `City dist: ${distanceToCity(tile, s.city).toFixed(1)}`,
         `State: ${stateText}`,
       ];
-      // Industry on this tile? Show recipe + status + monthly P&L.
-      if (tile.industryId) {
-        const ind = s.industries.find(i => i.id === tile.industryId);
-        if (ind) {
-          const recipe = INDUSTRIES[ind.recipeId];
-          if (recipe) {
-            const ins = Object.entries(recipe.inputs).map(([k, v]) => `${v}× ${k}`).join(' + ');
-            const outs = Object.entries(recipe.outputs).map(([k, v]) => `${v}× ${k}`).join(' + ');
-            lines.push(`🏭 ${recipe.name} [${ind.status}]`);
-            lines.push(`   ${ins} → ${outs}`);
-            lines.push(`   cycle ${recipe.cycleDays}d · ${recipe.workforce} workers × $${Math.round(wageRateFor(s, tile.countryId))} = $${effectiveSalary(s, tile.countryId, recipe)}/mo`);
-            if (ind.status === 'building') {
-              const left = recipe.buildDays - (s.time.totalDays - ind.startBuildDay);
-              lines.push(`   building: ${Math.max(0, left)}d left`);
-            } else if (ind.status === 'idle') {
-              lines.push(`   idle — waiting for inputs`);
-            } else if (ind.status === 'closed') {
-              lines.push(`   CLOSED — reopen costs $${recipe.buildCost}`);
-            } else {
-              const since = s.time.totalDays - (ind.lastCycleDay ?? s.time.totalDays);
-              lines.push(`   next cycle in ${Math.max(0, recipe.cycleDays - since)}d`);
-            }
-          }
-        }
-      }
-      if (tile.crop && !tile.industryId) {
+      if (tile.crop) {
         const def = PRODUCIBLES[tile.crop];
         const isMining = def.category === 'mining';
         if (isMining) {
@@ -709,9 +667,7 @@ export class Game extends Phaser.Scene {
         }
       }
       if (tile.lockType) {
-        const lockEmoji = tile.lockType === 'crop' ? '🌾'
-                         : tile.lockType === 'mining' ? '⛏'
-                         : '🏭';
+        const lockEmoji = tile.lockType === 'crop' ? '🌾' : '⛏';
         lines.push(`🔒 Locked to ${lockEmoji} ${tile.lockType}`);
       }
       if (tile.owner === 'wild') lines.push(`Price: $${tilePrice(tile, s)}`);
@@ -932,7 +888,7 @@ export class Game extends Phaser.Scene {
           const def = PRODUCIBLES[tile.crop];
           if (def.category === 'mining') {
             const isOpen = tile.miningStatus !== 'closed';
-            const reopenCost = Math.round(effectiveSetupCost(s, tile.countryId, def) * INDUSTRY.reopenCostFactor);
+            const reopenCost = Math.round(effectiveSetupCost(s, tile.countryId, def) * 0.3); // 30% restart capital
             const hint = isOpen
               ? `pays ${effectiveMonthlyOpCost(s, tile.countryId, def)}/mo · producing`
               : `reopen costs $${reopenCost}`;
@@ -1270,20 +1226,11 @@ export class Game extends Phaser.Scene {
     // INFO BLOCK — country snapshot
     // ============================================================
     // Count ventures owned by AI farmers/player in this country.
-    let nIndustryOp = 0, nIndustryIdle = 0, nIndustryClosed = 0, nIndustryBuilding = 0;
-    for (const ind of s.industries || []) {
-      if (ind.countryId !== countryId) continue;
-      if (ind.status === 'operational') nIndustryOp++;
-      else if (ind.status === 'idle') nIndustryIdle++;
-      else if (ind.status === 'closed') nIndustryClosed++;
-      else if (ind.status === 'building') nIndustryBuilding++;
-    }
     let nMineActive = 0, nMineClosed = 0, nCropActive = 0, nCropFallow = 0;
     const map = s.maps?.[countryId];
     if (map) {
       for (const tile of map.tiles) {
         if (!tile.crop) continue;
-        if (tile.industryId) continue;
         if (tile.owner === 'wild' || tile.owner === 'developer' || tile.owner === 'city') continue;
         const def = PRODUCIBLES[tile.crop];
         if (!def) continue;
@@ -1360,10 +1307,9 @@ export class Game extends Phaser.Scene {
       'LABOR DEMAND\n\n' +
       'Active jobs in this town.\n\n' +
       'Sum of:\n' +
-      '• workforce of every operational or idle industry (not closed)\n' +
       '• monthlyLabor for each active mining tile\n' +
       '• 1 worker per crop tile in cultivation (any crop, same cost)\n\n' +
-      'Goes up when building industries / mines / planting tiles. Drops when they close or go fallow.');
+      'Goes up when mines / crop tiles go active. Drops when they close or go fallow.');
 
     rowWithInfo(colA, infoTop + lineH * 4,
       `Wage: $${wage}/mo·worker  (×${tightnessStr})`,
@@ -1374,7 +1320,6 @@ export class Game extends Phaser.Scene {
       'actual wage = 60-day EMA of target (smooths spikes).\n\n' +
       '×tightness is the current pressure = √(demand/supply). >1 = tight market (wage rising). <1 = labor surplus (wage falling).\n\n' +
       'Affects EVERY labor cost:\n' +
-      '• Industry monthly salaries (workforce × wage)\n' +
       '• Crop harvest cost (harvestLabor × wage)\n' +
       '• Mine monthly op cost\n' +
       '• Plow / survey / storage costs\n\n' +
@@ -1387,7 +1332,6 @@ export class Game extends Phaser.Scene {
       'WAGE FUND\n\n' +
       'The town\'s accumulated wage pot. This is the cash population has available to spend on food.\n\n' +
       'Money flows in from:\n' +
-      '• Industries paying monthly salaries\n' +
       '• Harvest cost / plow / survey / storage cost\n' +
       '• Welfare top-up from treasury when it falls below floor\n\n' +
       'Money flows out to:\n' +
@@ -1434,17 +1378,6 @@ export class Game extends Phaser.Scene {
     ls(colA, venturesY, '── VENTURES ──', '#7a8694', '10px');
 
     rowWithInfo(colA, venturesY + lineH * 1,
-      `🏭 Industries: ${nIndustryOp} op · ${nIndustryIdle} idle · ${nIndustryBuilding} bld · ${nIndustryClosed} closed`,
-      '#cdd6df',
-      'INDUSTRIES (factories on halo tiles)\n\n' +
-      '• op (operational): producing every cycleDays, pays salaries monthly\n' +
-      '• idle: missing inputs to run; still pays salaries\n' +
-      '• bld (building): under construction, not producing yet\n' +
-      '• closed: shut down by decision or by inability to pay salary\n\n' +
-      'Every industry adds its `workforce` count to the town\'s labor demand.\n\n' +
-      'AI opens/closes based on 30-90 day ROI. A closed industry with good margins can reopen (at a discount vs full build cost).');
-
-    rowWithInfo(colA, venturesY + lineH * 2,
       `⛏ Mines: ${nMineActive} active · ${nMineClosed} closed`, '#cdd6df',
       'MINES\n\n' +
       'Active mining tiles for copper / iron / gold.\n\n' +
@@ -1452,7 +1385,7 @@ export class Game extends Phaser.Scene {
       '• closed: shut down by AI/player; no production or labor cost, but the tile keeps its "mining" lockType\n\n' +
       'Each active mine adds 1 worker to labor demand. Setup cost = setupLabor × wage (high: 50-180 worker-months).');
 
-    rowWithInfo(colA, venturesY + lineH * 3,
+    rowWithInfo(colA, venturesY + lineH * 2,
       `🌾 Crop tiles: ${nCropActive} growing · ${nCropFallow} fallow/plowed`, '#cdd6df',
       'CROP TILES\n\n' +
       '• growing: planted or mature, in mid-cycle. Add 1 worker to labor demand.\n' +
@@ -1883,8 +1816,7 @@ export class Game extends Phaser.Scene {
       this.autoplay?.tickDay(this.state);
       tickEvents(this.state);
       tickFarming(this.state);          // 2: harvests → owner inventory
-      tickIndustries(this.state);       // 3: industries consume inputs → produce outputs
-      tickMarket(this.state);           // 4: per-country supply/demand + cross-country trade + prices
+      tickMarket(this.state);           // 3: per-country supply/demand + cross-country trade + prices
       populationSpend(this.state);      // 5: country wage funds buy food (via executeTransaction)
       tickAI(this.state);               // 7: AI daily decisions (tickWages welfare baked into populationSpend)
       // 7b: Exporters — advance in-flight cargos, settle arrivals, and let
@@ -1899,8 +1831,7 @@ export class Game extends Phaser.Scene {
       if (this.state.time.totalDays % 7 === 0) tickAIWeekly(this.state);
     }
     if (events.month) {
-      tickIndustrySalaries(this.state); // 8: industries pay salaries
-      tickMiningOps(this.state);        // 8b: mines pay monthly labor → wageFund
+      tickMiningOps(this.state);        // 8: mines pay monthly labor → wageFund
       tickStorageCost(this.state);      // 8c: warehouse labor for held inventory
       tickLaborMarket(this.state);      // 8d: update country wageRate via EMA
       tickLoans(this.state);            // 9: bank charges
@@ -3185,7 +3116,7 @@ export class Game extends Phaser.Scene {
 
   computeCompaniesMaxScroll() {
     const n = 1 + (this.state.aiFarmers?.length || 0);
-    const rowH = 78;                              // bumped to fit the inventory line
+    const rowH = 58;
     const visibleH = this.companiesFrame.contentBottom - this.companiesFrame.contentTop - 30;
     return Math.max(0, n * rowH - visibleH);
   }
@@ -3270,31 +3201,11 @@ export class Game extends Phaser.Scene {
       const ownedTiles = co.isPlayer
         ? Object.values(s.maps).reduce((n, m) => n + m.tiles.filter(t => t.owner === 'player').length, 0)
         : (s.aiFarmers.find(a => a.id === co.id)?.ownedTileIds?.length || 0);
-      const myInds = (s.industries || []).filter(ind => ind.ownerId === co.id);
-      const operational = myInds.filter(ind => ind.status === 'operational').length;
-      const idle = myInds.filter(ind => ind.status === 'idle').length;
-      const closed = myInds.filter(ind => ind.status === 'closed').length;
-      const building = myInds.filter(ind => ind.status === 'building').length;
-
-      const stats = `💰 $${Math.round(co.cash)}    🏦 $${Math.round(debt)}    🌾 ${ownedTiles} tiles    🏭 ${operational} op / ${idle} idle / ${building} bld / ${closed} closed`;
+      const stats = `💰 $${Math.round(co.cash)}    🏦 $${Math.round(debt)}    🌾 ${ownedTiles} tiles`;
       const statsTxt = this.add.text(x + 22, ry + 22, stats, {
         fontFamily: 'monospace', fontSize: '11px', color: '#cdd6df',
       }).setDepth(58);
       this.companiesFrame.group.add(statsTxt); this.companiesDynamicNodes.push(statsTxt);
-
-      // Industry list
-      if (myInds.length > 0) {
-        const indNames = myInds.slice(0, 4).map(ind => {
-          const recipe = INDUSTRIES[ind.recipeId];
-          const tag = ind.status === 'operational' ? '✓' : ind.status === 'closed' ? '✕' : ind.status === 'building' ? '🛠' : '·';
-          return `${tag}${recipe?.name ?? ind.recipeId}`;
-        }).join('  ');
-        const more = myInds.length > 4 ? `  +${myInds.length - 4}` : '';
-        const indTxt = this.add.text(x + 22, ry + 40, indNames + more, {
-          fontFamily: 'monospace', fontSize: '10px', color: '#7a8694',
-        }).setDepth(58);
-        this.companiesFrame.group.add(indTxt); this.companiesDynamicNodes.push(indTxt);
-      }
 
       // Inventory line — what this company is HOLDING (off-market). Empty
       // entries omitted; shows up to 6 of the biggest stockpiles.
@@ -3308,12 +3219,12 @@ export class Game extends Phaser.Scene {
           const d = PRODUCIBLES[pid];
           return `${d?.name?.slice(0, 6) ?? pid} ${Math.round(qty)}u`;
         }).join(', ');
-        const invTxt = this.add.text(x + 22, ry + 58, invStr, {
+        const invTxt = this.add.text(x + 22, ry + 40, invStr, {
           fontFamily: 'monospace', fontSize: '10px', color: '#e8a060',
         }).setDepth(58);
         this.companiesFrame.group.add(invTxt); this.companiesDynamicNodes.push(invTxt);
       } else {
-        const noInv = this.add.text(x + 22, ry + 58, '📦 (no inventory)', {
+        const noInv = this.add.text(x + 22, ry + 40, '📦 (no inventory)', {
           fontFamily: 'monospace', fontSize: '10px', color: '#566370',
         }).setDepth(58);
         this.companiesFrame.group.add(noInv); this.companiesDynamicNodes.push(noInv);
