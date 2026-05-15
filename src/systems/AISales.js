@@ -1,20 +1,18 @@
-// AISales — drip-sell dinámico de inventario para AI farmers. Combina dos
-// señales para modular el rate de venta:
-//   1) priceRatio = price / MA60 — vende más cuando el precio está alto vs
-//      su media móvil (capitalizar oportunidad), menos cuando está bajo.
-//   2) stockPressure = qty / inventoryCap — vende más rápido cuanto más
-//      acumulado tiene (storage cost incentiva no acumular para siempre).
+// AISales — drip-list de inventario para AI farmers bajo modelo de consignación.
 //
-// Si stock > cap, override: fire-sale del exceso regardless of price.
+// Modelo: el AI no "vende" al market — LISTA stock en la góndola (sin recibir
+// cash aún). La plata llega cuando un buyer real compra del listing. Esto
+// elimina el cuello de botella del marketPool y hace que el hoarding sea
+// económicamente irracional (storage sigue charged sobre stock no-listado).
 //
-// SRP: only decides WHEN/HOW MUCH to sell. The selling rail (executeTransaction
-// + supplyToday push) is `sellFromInventory` in Market.js — the same one the
-// player uses, so AI and player share one code path.
+// La función decide CUÁNTO listar por semana usando:
+//   priceMult     = price / MA60 (sin clamp) — listar más cuando el precio está alto.
+//   stockPressure ≥ 1 — acelera el listing si hay mucho stock acumulado.
+//
+// Si el stock supera el cap consume × inventoryCapDays, force-list del exceso.
 
 import { AI } from '../data/tunables.js';
-import { priceMA, sellFromInventory, inventoryFor, recordSupplyIntent } from './Market.js';
-
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+import { priceMA, listOnMarket, inventoryFor, recordSupplyIntent } from './Market.js';
 
 export function aiTrySellInventory(state, ai) {
   const cid = ai.countryId;
@@ -29,33 +27,26 @@ export function aiTrySellInventory(state, ai) {
     const consumption = state.countries[cid]?.consumption?.[pid] ?? 0;
     const cap = consumption * AI.inventoryCapDays;
 
-    // Hard cap (force-sale del exceso): si el stock supera el cap por mucho,
-    // se descarga el exceso sin importar el precio. Storage cost ya estaría
-    // comiendo la rentabilidad.
-    if (consumption > 0 && qty > cap) {
-      const sellQty = Math.ceil(qty - cap);
-      recordSupplyIntent(state.countries[cid], pid, sellQty);
-      sellFromInventory(state, ai.id, pid, sellQty, cid);
+    // Force-list del excedente — sin guard `consumption > 0`. Si hay stock
+    // sobre el cap, dumpealo: storage cost lo hace irracional mantenerlo.
+    // Cuando cap=0 (item sin consumer baseline), cualquier qty > 0 es excedente.
+    if (qty > cap) {
+      const listQty = Math.ceil(qty - cap);
+      recordSupplyIntent(state.countries[cid], pid, listQty);
+      listOnMarket(state, ai.id, pid, listQty, cid);
       continue;
     }
 
-    // Drip-sell dinámico (Opción B):
-    //   priceMult     ∈ [0.2, 2.5] — clampea price/MA60. Precio bajo → vendo
-    //                              poco (cash flow básico). Precio alto → vendo más.
-    //   stockPressure ≥ 1.0     — empieza a acelerar cuando stock supera 50%
-    //                              del cap. Sin tope: más stock = más urgencia.
-    //   sellRate = AI.sellRate × priceMult × stockPressure
-    // Cuando consumption=0 (item sin consumer real), cap=0 → stockRatio
-    // siempre 1 (tratamos como "full cap") para que la presión sea neutral
-    // y la fórmula no divida por cero.
+    // Drip-list dinámico — sin clamp arbitrario en priceMult. A precios muy
+    // bajos, AI lista menos (priceMult chico). A precios altos, lista más.
+    // Comportamiento orgánico sin números mágicos.
     const priceRatio = price / ma60;
-    const priceMult = clamp(priceRatio, 0.2, 2.5);
     const stockRatio = cap > 0 ? (qty / cap) : 1;
     const stockPressure = 1 + Math.max(0, stockRatio - 0.5);
-    const dynamicRate = AI.sellRate * priceMult * stockPressure;
+    const dynamicRate = AI.sellRate * priceRatio * stockPressure;
 
-    const sellQty = Math.max(1, Math.floor(qty * dynamicRate));
-    recordSupplyIntent(state.countries[cid], pid, sellQty);
-    sellFromInventory(state, ai.id, pid, sellQty, cid);
+    const listQty = Math.max(1, Math.floor(qty * dynamicRate));
+    recordSupplyIntent(state.countries[cid], pid, listQty);
+    listOnMarket(state, ai.id, pid, listQty, cid);
   }
 }

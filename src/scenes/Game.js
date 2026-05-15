@@ -11,7 +11,7 @@ import {
 import { tickClock, setSpeed, formatDate } from '../systems/Clock.js';
 import {
   tickMarket, priceTrend, tickCountriesYearly,
-  sellFromInventory, buyFromGlobal, inventoryOf, recordSupplyIntent,
+  listOnMarket, buyFromMarket, inventoryOf, recordSupplyIntent,
   elasticityFor, elasticityTargetFor,
   populationSpend, marketInventoryOf,
   offMarketInventoryFor,
@@ -1869,12 +1869,13 @@ export class Game extends Phaser.Scene {
         sellBg.on('pointerover', () => sellBg.setFillStyle(0x3aaa6a));
         sellBg.on('pointerout', () => sellBg.setFillStyle(0x2a8a5a));
         sellBg.on('pointerdown', () => {
-          // Capturar supply intent del player ANTES de la venta — refleja
-          // su intención al precio actual, exista o no buyer del lado opuesto.
+          // Capturar supply intent del player. El listing se materializa
+          // como stock disponible en la góndola; el cash llega cuando alguien
+          // compre de las unidades listadas (consignación).
           recordSupplyIntent(s.countries[cid], def.id, qty);
-          const r = sellFromInventory(s, 'player', def.id, qty, cid);
+          const r = listOnMarket(s, 'player', def.id, qty, cid);
           if (r.ok) {
-            pushLog(s, `Sold ${r.units}u ${def.name} → $${r.revenue} (${cid})`);
+            pushLog(s, `Listed ${r.units}u ${def.name} en el mercado (${cid})`);
             pushFx(s, { type: 'sfx', kind: 'coin' });
           } else if (r.reason) pushLog(s, r.reason);
           this.refreshMarketModal();
@@ -1898,7 +1899,7 @@ export class Game extends Phaser.Scene {
         buyBg.on('pointerover', () => buyBg.setFillStyle(0x8a6cd2));
         buyBg.on('pointerout', () => buyBg.setFillStyle(0x6a4cb2));
         buyBg.on('pointerdown', () => {
-          const r = buyFromGlobal(s, 'player', def.id, qty, cid);
+          const r = buyFromMarket(s, 'player', def.id, qty, cid);
           if (r.ok) {
             pushLog(s, `Bought ${r.units}u ${def.name} → -$${r.cost} (${cid})`);
             pushFx(s, { type: 'sfx', kind: 'coinNeg' });

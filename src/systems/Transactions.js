@@ -22,7 +22,7 @@ import { logEvent } from '../state/GameState.js';
 export function walletOf(state, ownerId) {
   if (ownerId === 'player') return state.player;
   if (ownerId === 'population' || ownerId === 'treasury') return null;
-  if (ownerId === 'foreign') return null;
+  if (ownerId === 'foreign' || ownerId === 'system') return null;
   // Registry lookup — any actor type that registered itself in state.wallets
   // (AI farmers, future actors) is reachable through this single call.
   // Falls back to aiFarmers scan for any legacy caller that pre-dates
@@ -123,8 +123,13 @@ export function executeTransaction(state, params) {
   // 4. Pay the seller side.
   if (isRealSeller) {
     sellerWallet.cash += netToSeller;
+  } else if (sellerId === 'system') {
+    // Boot seed listings ('system' como pseudo-seller). El cash recibido
+    // se acredita al treasury — el seed inicial fue subsidio público que
+    // se "recupera" cuando la pop lo consume.
+    txCountry.treasury += netToSeller;
   } else if (sellerId === 'foreign') {
-    // marketPool[txCountry] receives the cash for goods it just delivered.
+    // Legacy: marketPool. Eventualmente se elimina con el refactor.
     txCountry.marketPool += grossRevenue;
   }
 

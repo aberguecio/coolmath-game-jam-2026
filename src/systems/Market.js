@@ -9,6 +9,7 @@ import { PRODUCIBLES, PRODUCIBLE_IDS, isFood } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { tickPriceIndex } from './PriceIndex.js';
 import { executeTransaction, walletOf, walletCountryFor } from './Transactions.js';
+import { effectiveTaxRates } from '../data/taxRates.js';
 import { recordMarketSnapshot } from './MarketHistory.js';
 import { tickProductionDecisions } from './Production.js';
 
@@ -163,13 +164,21 @@ const ROTATE_PAIRS = [
 export function initMarket(state) {
   const m = state.market;
   m.prices = {}; m.history = {}; m.inventory = {}; m.targetStock = {};
+  // Consignación: cada listing es del owner real. m.listings[cid][pid][ownerId]=units.
+  // m.inventory[cid][pid] queda como cache denormalizado del total (suma de listings).
+  // Toda mutación pasa por listOnMarket / buyFromMarket → ambas estructuras se
+  // mantienen sincronizadas. Lectura: m.inventory para "stock total en góndola"
+  // (price formation, charts), m.listings para "quién es el dueño de cada slot"
+  // (pro-rata en buyFromMarket).
+  m.listings = {};
   for (const cid of COUNTRY_IDS) {
-    m.prices[cid] = {}; m.history[cid] = {}; m.inventory[cid] = {};
+    m.prices[cid] = {}; m.history[cid] = {}; m.inventory[cid] = {}; m.listings[cid] = {};
     for (const pid of PRODUCIBLE_IDS) {
       const def = PRODUCIBLES[pid];
       const base = marketParam(def, 'basePrice');
       m.prices[cid][pid] = base;
       m.history[cid][pid] = [base];
+      m.listings[cid][pid] = {};
     }
   }
   recomputeTargetStocks(state);
@@ -205,10 +214,12 @@ export function initMarket(state) {
       if (isFoodWithPref && prefSum > 0) {
         const share = prefs[pid] / prefSum;
         const nutritionForThisFood = survivalNutritionMonth * share;
-        const units = nutritionForThisFood / def.nutritionUnits;
-        m.inventory[cid][pid] = Math.round(units);
+        const units = Math.round(nutritionForThisFood / def.nutritionUnits);
+        // Seed inicial bajo pseudo-owner 'system' — cuando la pop lo consume,
+        // el cash recibido va a treasury (subsidio público de boot recuperado).
+        m.listings[cid][pid].system = units;
+        m.inventory[cid][pid] = units;
       } else {
-        // Minerales, industriales, foods sin preferencia → góndola vacía.
         m.inventory[cid][pid] = 0;
       }
     }
@@ -438,82 +449,123 @@ export function harvestToInventory(state, ownerId, producibleId, units, countryI
   return units;
 }
 
-// opts.unitPrice  → override del precio spot
-export function sellFromInventory(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID, opts = {}) {
+// =============================================================================
+// Consignación: owner lista stock en la góndola sin recibir cash. La plata
+// llega cuando un buyer real compra (buyFromMarket). Modelo realista de
+// supermercado: el shelf es un escaparate, no un comprador intermediario.
+// =============================================================================
+
+// Lista `units` de stock del wallet del owner a la góndola del país. NO HAY
+// transacción de dinero — sólo bookkeeping. El cash llegará cuando alguien
+// compre del listing.
+export function listOnMarket(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
   const wallet = walletOf(state, ownerId);
   if (!wallet) return { ok: false, reason: 'No wallet' };
   const inv = inventoryFor(wallet, countryId);
   const have = inv[producibleId] || 0;
-  const sell = Math.min(Math.floor(units), have);
-  if (sell <= 0) return { ok: false, reason: 'Nothing to sell here' };
-  const price = opts.unitPrice ?? state.market.prices?.[countryId]?.[producibleId] ?? 0;
-  if (price <= 0) return { ok: false, reason: 'No market price' };
-  const r = executeTransaction(state, {
-    sellerId: ownerId,
-    buyerId: 'foreign',
-    productId: producibleId,
-    units: sell,
-    unitPrice: price,
-    countryOfTransaction: countryId,
-    type: 'b2b',
-  });
-  if (!r.ok) return { ok: false, reason: r.reason };
-  // Transferencia atómica de stock: del wallet del vendedor a la góndola del
-  // país. Toda la venta es UNA sola operación — no hay pipeline diferido
-  // (supplyToday → marketStock vía tickMarket) que podría romperse por orden
-  // de operaciones. SRP: sellFromInventory es responsable de todo lo que es
-  // "una venta" (plata + stock + tracking).
-  inv[producibleId] = have - sell;
+  const list = Math.min(Math.floor(units), have);
+  if (list <= 0) return { ok: false, reason: 'Nothing to list' };
+  // Mover del wallet del seller a m.listings[cid][pid][ownerId].
+  inv[producibleId] = have - list;
+  if (!state.market.listings[countryId]) state.market.listings[countryId] = {};
+  if (!state.market.listings[countryId][producibleId]) state.market.listings[countryId][producibleId] = {};
+  const listing = state.market.listings[countryId][producibleId];
+  listing[ownerId] = (listing[ownerId] || 0) + list;
+  // Cache denormalizado del total listado para los readers (price formation,
+  // charts) que tratan inventory como "stock total en góndola".
   if (!state.market.inventory[countryId]) state.market.inventory[countryId] = {};
   state.market.inventory[countryId][producibleId] =
-    (state.market.inventory[countryId][producibleId] || 0) + sell;
-  _recordSupply(state.countries[countryId], producibleId, sell);
-  return { ok: true, units: sell, revenue: r.netToSeller, price };
+    (state.market.inventory[countryId][producibleId] || 0) + list;
+  _recordSupply(state.countries[countryId], producibleId, list);
+  return { ok: true, units: list };
 }
 
-export function buyFromGlobal(state, ownerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
-  const wallet = walletOf(state, ownerId);
-  if (!wallet) return { ok: false, reason: 'Wallet missing' };
-  const stock = state.market.inventory?.[countryId]?.[producibleId] || 0;
-  const buy = Math.min(Math.floor(units), stock);
-  if (buy <= 0) return { ok: false, reason: 'Out of stock' };
+// Buyer compra `units` del mercado. Allocación pro-rata sobre los sellers
+// que tienen stock listado: cada uno vende su share del total. Cash fluye
+// directo del buyer a cada seller (sin intermediario marketPool). Tax y
+// wages se cobran por transacción individual.
+// Retorna unidades efectivamente compradas y cost total agregado.
+export function buyFromMarket(state, buyerId, producibleId, units, countryId = PLAYER_COUNTRY_ID) {
+  const listing = state.market.listings?.[countryId]?.[producibleId] || {};
+  let totalAvail = 0;
+  for (const v of Object.values(listing)) totalAvail += v;
+  if (totalAvail <= 0) return { ok: false, reason: 'No listings' };
+
   const price = state.market.prices?.[countryId]?.[producibleId] || 0;
-  const r = executeTransaction(state, {
-    sellerId: 'foreign',
-    buyerId: ownerId,
-    productId: producibleId,
-    units: buy,
-    unitPrice: price,
-    countryOfTransaction: countryId,
-    type: 'sale',
-  });
-  if (!r.ok) return { ok: false, reason: r.reason };
-  state.market.inventory[countryId][producibleId] -= buy;
-  _recordConsumption(state.countries[countryId], producibleId, buy);
-  const inv = inventoryFor(wallet, countryId);
-  inv[producibleId] = (inv[producibleId] || 0) + buy;
-  return { ok: true, units: buy, cost: r.grossRevenue + r.taxPaid + r.transportPaid, price };
-}
+  if (price <= 0) return { ok: false, reason: 'No price' };
 
-// =============================================================================
-// Write-off: mover stock owner → marketStock SIN intercambio de dinero
-// =============================================================================
-// Mismo rail que sellFromInventory pero sin executeTransaction. Conservación de
-// stock: las unidades salen del wallet, entran a la góndola. Conservación de
-// dinero: cero movimiento (el seller eats the loss).
-export function writeOffToMarket(state, ownerId, producibleId, units, countryId) {
-  const wallet = walletOf(state, ownerId);
-  if (!wallet) return { ok: false, reason: 'No wallet' };
-  const inv = inventoryFor(wallet, countryId);
-  const have = inv[producibleId] || 0;
-  const sell = Math.min(Math.floor(units), have);
-  if (sell <= 0) return { ok: false, reason: 'Nothing to write off' };
-  inv[producibleId] = have - sell;
-  if (!state.market.inventory[countryId]) state.market.inventory[countryId] = {};
-  state.market.inventory[countryId][producibleId] =
-    (state.market.inventory[countryId][producibleId] || 0) + sell;
-  _recordSupply(state.countries[countryId], producibleId, sell);
-  return { ok: true, units: sell };
+  // Cap por presupuesto del buyer y por stock disponible.
+  const rates = effectiveTaxRates(state, countryId);
+  const unitCost = price * (1 + (rates.sale ?? 0));
+  let availableCash;
+  if (buyerId === 'population') availableCash = state.countries[countryId].wageFund;
+  else if (buyerId === 'treasury') availableCash = state.countries[countryId].treasury;
+  else {
+    const w = walletOf(state, buyerId);
+    availableCash = w?.cash ?? 0;
+  }
+  const maxByCash = unitCost > 0 ? Math.floor(availableCash / unitCost) : 0;
+  let unitsToBuy = Math.min(Math.floor(units), Math.floor(totalAvail), maxByCash);
+  if (unitsToBuy <= 0) return { ok: false, reason: 'Cannot afford / no stock' };
+
+  // Allocación pro-rata: cada seller vende (sellerStock / totalAvail) × unitsToBuy.
+  // Floor con remainder al seller más grande (preserva conservación de unidades).
+  const sellers = Object.entries(listing).filter(([, q]) => q > 0);
+  const alloc = {};
+  let allocSum = 0;
+  for (const [sid, qty] of sellers) {
+    const share = Math.floor((qty / totalAvail) * unitsToBuy);
+    alloc[sid] = Math.min(share, qty);   // sin exceder lo que tiene
+    allocSum += alloc[sid];
+  }
+  // Distribuir remainder por seller con más stock disponible aún.
+  let remainder = unitsToBuy - allocSum;
+  if (remainder > 0) {
+    const sortedByCap = sellers
+      .map(([sid, qty]) => ({ sid, cap: qty - (alloc[sid] || 0) }))
+      .filter(s => s.cap > 0)
+      .sort((a, b) => b.cap - a.cap);
+    for (const s of sortedByCap) {
+      const take = Math.min(remainder, s.cap);
+      alloc[s.sid] += take;
+      remainder -= take;
+      if (remainder <= 0) break;
+    }
+  }
+
+  // Ejecutar una transacción por seller. Si alguna falla, se skipea
+  // (el resto procede). Las unidades efectivamente compradas se cuentan.
+  let unitsBought = 0;
+  let totalCost = 0;
+  for (const [sid, qty] of Object.entries(alloc)) {
+    if (qty <= 0) continue;
+    const r = executeTransaction(state, {
+      sellerId: sid,
+      buyerId,
+      productId: producibleId,
+      units: qty,
+      unitPrice: price,
+      countryOfTransaction: countryId,
+      type: 'sale',
+    });
+    if (!r.ok) continue;
+    listing[sid] -= qty;
+    if (listing[sid] <= 0) delete listing[sid];
+    state.market.inventory[countryId][producibleId] -= qty;
+    // Si el buyer es un wallet real, recibe el stock; si es population, lo consume.
+    if (buyerId !== 'population' && buyerId !== 'treasury') {
+      const w = walletOf(state, buyerId);
+      if (w) {
+        const binv = inventoryFor(w, countryId);
+        binv[producibleId] = (binv[producibleId] || 0) + qty;
+      }
+    }
+    unitsBought += qty;
+    totalCost += r.grossRevenue + r.taxPaid;
+  }
+  if (unitsBought <= 0) return { ok: false, reason: 'All allocations failed' };
+  _recordConsumption(state.countries[countryId], producibleId, unitsBought);
+  return { ok: true, units: unitsBought, cost: totalCost, price };
 }
 
 // =============================================================================

@@ -1,6 +1,6 @@
 import { PRODUCIBLES } from '../data/producibles.js';
 import { LAND_ACTIONS, FISCAL_CRISIS, FARMING } from '../data/tunables.js';
-import { harvestToInventory, sellFromInventory } from './Market.js';
+import { harvestToInventory, listOnMarket } from './Market.js';
 import { applyForLoan, quoteLoan, walletFor } from './Bank.js';
 import { tilePrice, pushLog, pushFx } from '../state/GameState.js';
 import { growthMultiplier } from './Events.js';
@@ -391,10 +391,9 @@ export function harvestTile(state, tile) {
   const def = PRODUCIBLES[cropId];
   const units = expectedYield(def, effectiveQualityFor(def, tile));
   // SOLID/LSP: misma ruta que la AI — la cosecha aterriza en el inventario
-  // del player y la venta pasa por sellFromInventory → executeTransaction,
-  // así el marketPool del país paga (y cobra impuestos) en lugar de generar
-  // cash fiat. Si el pool está seco, las unidades quedan en inventario y el
-  // player puede vender después desde el Market modal.
+  // del player y se lista en el market vía consignación. El cash llega cuando
+  // alguien compre. Si no se quiere auto-listar (manual harvest), las unidades
+  // quedan en inventario del player.
   harvestToInventory(state, 'player', cropId, units, tile.countryId);
   tile.lastHarvestDay = state.time.totalDays;
   tile.matureSinceDay = null;                       // clear grace timer
@@ -409,10 +408,11 @@ export function harvestTile(state, tile) {
     tile.growth = 0;
   }
 
-  const r = sellFromInventory(state, 'player', cropId, units, tile.countryId);
+  // Auto-list al market (consignación). Cash llega cuando se compre.
+  const r = listOnMarket(state, 'player', cropId, units, tile.countryId);
   if (r.ok) {
-    pushLog(state, `Harvested ${units}u of ${def.name} → sold for $${Math.round(r.revenue)}`);
-    return { ok: true, units, revenue: r.revenue };
+    pushLog(state, `Harvested ${units}u of ${def.name} → listed in market`);
+    return { ok: true, units, listed: r.units };
   }
   pushLog(state, `Harvested ${units}u of ${def.name} → kept in inventory (${r.reason})`);
   return { ok: true, units, revenue: 0, kept: true };

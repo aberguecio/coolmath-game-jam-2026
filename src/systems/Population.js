@@ -8,8 +8,7 @@ import { PRODUCIBLES, PRODUCIBLE_IDS, isFood } from '../data/producibles.js';
 import { COUNTRIES, COUNTRY_IDS } from '../data/countries.js';
 import { effectiveTaxRates } from '../data/taxRates.js';
 import { WAGES } from '../data/tunables.js';
-import { executeTransaction } from './Transactions.js';
-import { recordConsumption, recordDemandIntent } from './Market.js';
+import { buyFromMarket, recordDemandIntent } from './Market.js';
 
 export function populationSpend(state) {
   for (const cid of COUNTRY_IDS) {
@@ -65,25 +64,15 @@ export function populationSpend(state) {
       if (demandUnits <= 0) continue;
       recordDemandIntent(c, cand.pid, demandUnits);
 
-      // 2. Ahora sí mirar stock para realizar la compra efectiva.
+      // 2. Compra del market via consignación. Pro-rata entre sellers.
+      // buyFromMarket maneja el cap por wageFund disponible, recordConsumption,
+      // y la actualización de m.inventory + m.listings.
       const inv = m.inventory[cid][cand.pid] || 0;
       if (inv <= 0) continue;
-      const buyUnits = Math.min(demandUnits, inv);
-      if (buyUnits <= 0) continue;
-      const r = executeTransaction(state, {
-        sellerId: 'foreign',
-        buyerId: 'population',
-        productId: cand.pid,
-        units: buyUnits,
-        unitPrice: cand.price,
-        countryOfTransaction: cid,
-        type: 'sale',
-      });
+      const r = buyFromMarket(state, 'population', cand.pid, Math.min(demandUnits, inv), cid);
       if (!r.ok) continue;
-      m.inventory[cid][cand.pid] -= buyUnits;
-      recordConsumption(c, cand.pid, buyUnits);
-      nutritionAcquired += buyUnits * cand.nutrition;
-      budget -= (r.grossRevenue + r.taxPaid);
+      nutritionAcquired += r.units * cand.nutrition;
+      budget -= r.cost;
     }
 
     // Welfare top-up

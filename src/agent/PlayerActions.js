@@ -21,7 +21,7 @@ import {
   buyTile, plowTile, plantTile, harvestTile, uprootTile, toggleAutoReplant,
 } from '../systems/Farming.js';
 import { applyForLoan } from '../systems/Bank.js';
-import { sellFromInventory, buyFromGlobal } from '../systems/Market.js';
+import { listOnMarket, buyFromMarket } from '../systems/Market.js';
 
 // =============================================================================
 // Tile lifecycle
@@ -66,11 +66,12 @@ export function actToggleAutoReplant(state, { tileId, countryId }) {
 // Market trading (player wallet only — bots use this same path)
 // =============================================================================
 export function actSellInventory(state, { producibleId, units, countryId }) {
-  return sellFromInventory(state, 'player', producibleId, units, countryId);
+  // Player lista stock en la góndola (consignación). Cash llega cuando alguien compra.
+  return listOnMarket(state, 'player', producibleId, units, countryId);
 }
 
 export function actBuyFromMarket(state, { producibleId, units, countryId }) {
-  return buyFromGlobal(state, 'player', producibleId, units, countryId);
+  return buyFromMarket(state, 'player', producibleId, units, countryId);
 }
 
 // =============================================================================
