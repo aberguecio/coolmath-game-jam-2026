@@ -2400,26 +2400,35 @@ export class Game extends Phaser.Scene {
 
     // ---- Legend (TODAS las series, click togglea visibilidad) ----
     // Creado DESPUÉS del hoverHit para que la lista de input lo procese primero.
+    // Layout: items alineados de derecha a izquierda, origen (0,0) para claridad.
     if (series.length >= 2) {
-      let legendX = plotRight - 10;
+      const SQ = 8, GAP = 4, ITEM_GAP = 14, ROW_TOP = plotTop + 4, HIT_PAD = 4;
+      let itemRight = plotRight - 10;
       for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
         const ser = series[sIdx];
         const hidden = isHidden(ser);
-        const labW = ser.label.length * 7 + 16;
-        const hitBg = this.add.rectangle(legendX - labW - 4, plotTop + 2, labW + 8, 14, 0x000000, 0.01)
-          .setOrigin(1, 0).setDepth(66).setInteractive({ useHandCursor: true });
-        const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color, hidden ? 0.25 : 1)
-          .setOrigin(1, 0).setDepth(67);
+        const textW = ser.label.length * 7;          // estimate monospace 10px
+        const itemW = SQ + GAP + textW;
+        const itemLeft = itemRight - itemW;
+        const sqX = itemLeft;
+        const labX = itemLeft + SQ + GAP;
+        // Hit zone abarca sq + label con padding.
+        const hitBg = this.add.rectangle(
+          itemLeft - HIT_PAD, ROW_TOP - 2, itemW + HIT_PAD * 2, 14,
+          0x000000, 0.01,
+        ).setOrigin(0, 0).setDepth(66).setInteractive({ useHandCursor: true });
+        const sq = this.add.rectangle(sqX, ROW_TOP, SQ, SQ, ser.color, hidden ? 0.25 : 1)
+          .setOrigin(0, 0).setDepth(67);
         const labColor = hidden
           ? '#566370'
           : '#' + ser.color.toString(16).padStart(6, '0');
-        const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
+        const lab = this.add.text(labX, ROW_TOP, ser.label, {
           fontFamily: 'monospace', fontSize: '10px', color: labColor,
         }).setOrigin(0, 0).setDepth(67);
         if (hidden) lab.setFontStyle('italic');
         hitBg.on('pointerover', () => {
           hitBg.setFillStyle(0xffffff, 0.12);
-          this._clearChartHover();   // mientras se hover el legend, sacar el tooltip
+          this._clearChartHover();
         });
         hitBg.on('pointerout', () => hitBg.setFillStyle(0x000000, 0.01));
         hitBg.on('pointerdown', () => {
@@ -2429,7 +2438,7 @@ export class Game extends Phaser.Scene {
         this.priceChartFrame.group.add(hitBg);
         this.priceChartFrame.group.add(sq); this.priceChartFrame.group.add(lab);
         this.priceChartDynamic.push(hitBg, sq, lab);
-        legendX -= (labW + 14);
+        itemRight = itemLeft - ITEM_GAP;
       }
     }
 
