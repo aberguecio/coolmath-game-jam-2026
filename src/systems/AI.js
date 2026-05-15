@@ -56,6 +56,11 @@ export function createAIFarmersForCountry(state, countryId) {
       // country, but the schema mirrors the player so every wallet shares one
       // code path (SRP for inventory access — see inventoryFor in Market.js).
       inventoryByCountry: { [countryId]: {} },
+      // Fracción del inventario que el AI conserva en su wallet en vez de
+      // listar al mercado. Default 0 = lista todo. Hook para personalidades
+      // futuras: un "hoarder" podría tener 0.5 (guarda mitad esperando precios
+      // mejores), un "trader" cero, un "small-scale farmer" 0.2, etc.
+      keepFraction: 0,
     });
   }
   return farmers;

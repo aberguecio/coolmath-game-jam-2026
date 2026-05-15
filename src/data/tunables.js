@@ -122,12 +122,6 @@ export const AI = {
   loanAmount: 5000,
   names: ['Old Pete', 'Sofia Co-op', 'North Ranch', 'Cabrera Bros.'],
   colors: [0xb24cae, 0x4ca6b2, 0xb27a3a, 0x6a4cb2],
-  // === Inventory / sale strategy (Sprint B) ============================
-  // AI stops dump-selling harvests. Output goes to ai.inventory and is
-  // drained gradually when the spot price is close enough to the MA60.
-  sellThreshold: 0.85,           // sell only when currentPrice ≥ MA60 × this
-  sellRate: 0.15,                // 15% of stock sold per monthly attempt
-  inventoryCapDays: 30,          // hard cap = N days of local consumption; dump if exceeded
 };
 
 // Top-level event scheduler. Per-event-type stats live in eventTypes.js.
