@@ -2381,42 +2381,8 @@ export class Game extends Phaser.Scene {
       this.priceChartGfx.strokePath();
     }
 
-    // ---- Legend (TODAS las series, click togglea visibilidad) ----
-    if (series.length >= 2) {
-      let legendX = plotRight - 10;
-      for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
-        const ser = series[sIdx];
-        const hidden = isHidden(ser);
-        const labW = ser.label.length * 7 + 16;
-        // Hit zone englobando sq + label, clickable
-        const hit = this.add.rectangle(legendX - labW - 4, plotTop + 2, labW + 8, 14, 0x000000, 0.01)
-          .setOrigin(1, 0).setDepth(63).setInteractive({ useHandCursor: true });
-        const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color, hidden ? 0.25 : 1)
-          .setOrigin(1, 0).setDepth(64);
-        const labColor = hidden
-          ? '#566370'
-          : '#' + ser.color.toString(16).padStart(6, '0');
-        const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
-          fontFamily: 'monospace', fontSize: '10px', color: labColor,
-        }).setOrigin(0, 0).setDepth(64);
-        if (hidden) lab.setFontStyle('italic');
-        hit.on('pointerover', () => hit.setFillStyle(0xffffff, 0.08));
-        hit.on('pointerout', () => hit.setFillStyle(0x000000, 0.01));
-        hit.on('pointerdown', () => {
-          s.ui.priceChartHidden[serKey(ser)] = !s.ui.priceChartHidden[serKey(ser)];
-          this.refreshPriceChartModal();
-        });
-        this.priceChartFrame.group.add(hit);
-        this.priceChartFrame.group.add(sq); this.priceChartFrame.group.add(lab);
-        this.priceChartDynamic.push(hit, sq, lab);
-        legendX -= (labW + 14);
-      }
-    }
-
-    // ---- Hover tooltip ----
-    // Hit zone transparente sobre el plot area. Al mover el mouse muestra
-    // un guide vertical + dots + tooltip con los valores de cada serie visible
-    // en ese día.
+    // ---- Hover tooltip (creado ANTES del legend para que el legend tenga
+    // prioridad de input — Phaser ordena hits por orden de creación inverso) ----
     this._clearChartHover();
     const hoverHit = this.add.rectangle(plotLeft, plotTop, plotW, plotH, 0x000000, 0.001)
       .setOrigin(0, 0).setDepth(62).setInteractive({ useHandCursor: false });
@@ -2431,6 +2397,41 @@ export class Game extends Phaser.Scene {
     hoverHit.on('pointerout', () => this._clearChartHover());
     this.priceChartFrame.group.add(hoverHit);
     this.priceChartDynamic.push(hoverHit);
+
+    // ---- Legend (TODAS las series, click togglea visibilidad) ----
+    // Creado DESPUÉS del hoverHit para que la lista de input lo procese primero.
+    if (series.length >= 2) {
+      let legendX = plotRight - 10;
+      for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
+        const ser = series[sIdx];
+        const hidden = isHidden(ser);
+        const labW = ser.label.length * 7 + 16;
+        const hitBg = this.add.rectangle(legendX - labW - 4, plotTop + 2, labW + 8, 14, 0x000000, 0.01)
+          .setOrigin(1, 0).setDepth(66).setInteractive({ useHandCursor: true });
+        const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color, hidden ? 0.25 : 1)
+          .setOrigin(1, 0).setDepth(67);
+        const labColor = hidden
+          ? '#566370'
+          : '#' + ser.color.toString(16).padStart(6, '0');
+        const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
+          fontFamily: 'monospace', fontSize: '10px', color: labColor,
+        }).setOrigin(0, 0).setDepth(67);
+        if (hidden) lab.setFontStyle('italic');
+        hitBg.on('pointerover', () => {
+          hitBg.setFillStyle(0xffffff, 0.12);
+          this._clearChartHover();   // mientras se hover el legend, sacar el tooltip
+        });
+        hitBg.on('pointerout', () => hitBg.setFillStyle(0x000000, 0.01));
+        hitBg.on('pointerdown', () => {
+          s.ui.priceChartHidden[serKey(ser)] = !s.ui.priceChartHidden[serKey(ser)];
+          this.refreshPriceChartModal();
+        });
+        this.priceChartFrame.group.add(hitBg);
+        this.priceChartFrame.group.add(sq); this.priceChartFrame.group.add(lab);
+        this.priceChartDynamic.push(hitBg, sq, lab);
+        legendX -= (labW + 14);
+      }
+    }
 
     // Min/max markers — price + stocks (flows son ruidosos, marker poco útil)
     if (mode === 'price' || mode === 'stocks') {
