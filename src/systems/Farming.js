@@ -89,13 +89,17 @@ function autoHarvest(state, tile, def) {
     pushFx(state, { type: 'bounceTile', tileId: tile.id, scale: 1.15 });
     pushFx(state, { type: 'sfx', kind: 'chime' });
   } else {
-    // AI deposits to its own inventory (same as player). The actual selling
-    // happens later in aiTrySellInventory at fair-market prices, gradually.
-    // This breaks the cobweb dump-sell cycle.
-    // Same code path as the player above — one harvestToInventory, one
-    // inventoryFor under the hood. Goods land in the country where the tile is.
+    // AI cosecha → deposita en su wallet → INMEDIATAMENTE lista al market.
+    // Sin ventana de hoarding entre harvest y el tick semanal de aiTrySellInventory.
+    // Respeta keepFraction del AI (default 0 = lista todo; personalidades futuras
+    // pueden setear distinto para retener una fracción).
     const ai = state.aiFarmers?.find(a => a.id === tile.owner);
-    if (ai) harvestToInventory(state, ai.id, tile.crop, units, tile.countryId);
+    if (ai) {
+      harvestToInventory(state, ai.id, tile.crop, units, tile.countryId);
+      const keep = Math.max(0, Math.min(1, ai.keepFraction ?? 0));
+      const listQty = Math.floor(units * (1 - keep));
+      if (listQty > 0) listOnMarket(state, ai.id, tile.crop, listQty, tile.countryId);
+    }
     // Profitability streak: AI counts how many consecutive harvests would
     // have lost money at current spot prices. For perennials, after 2 lost
     // cycles in a row, uproot so the tile can be replanted with something
