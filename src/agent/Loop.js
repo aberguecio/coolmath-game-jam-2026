@@ -6,7 +6,7 @@
 // Orden por día (espejo de scenes/Game.js update() para que humano y headless
 // tengan el mismo determinismo):
 //   1. observe(state) → snapshot
-//   2. driver.decide(obs, PlayerActions) → Action[]
+//   2. driver.decide(obs, Actions) → Action[]
 //   3. apply cada acción
 //   4. advance one day (Clock-equivalente)
 //   5. tickEvents → Farming → Industries → Market → Population → AI
@@ -15,7 +15,7 @@
 //   6. drain fxQueue (no-op consumer headless)
 //   7. onTick callback (TraceLog enchufa acá)
 
-import * as PlayerActions from './PlayerActions.js';
+import * as Actions from './Actions.js';
 import { observe } from './Observation.js';
 import { bootHeadlessState, advanceOneDay } from './Boot.js';
 
@@ -38,7 +38,7 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
     // 2. Bot decides intra-day actions.
     let acts = [];
     try {
-      acts = driver.decide?.(obs, PlayerActions) ?? [];
+      acts = driver.decide?.(obs, Actions) ?? [];
     } catch (err) {
       acts = [];
       console.error(`driver threw on day ${state.time.totalDays}:`, err);
@@ -47,7 +47,7 @@ export function runSession({ driver, days = 365, state = null, onTick = null }) 
 
     // 3. Apply each action. Per-action failures don't kill the loop.
     const results = [];
-    for (const a of acts) results.push(PlayerActions.apply(state, a));
+    for (const a of acts) results.push(Actions.apply(state, a));
 
     // 4. Advance the clock by exactly one day.
     const events = advanceOneDay(state);

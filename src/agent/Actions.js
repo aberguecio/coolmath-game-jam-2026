@@ -1,20 +1,20 @@
-// PlayerActions — fachada de acciones que un player puede realizar.
+// Actions — fachada de acciones que CUALQUIER actor puede tomar (player o AI).
 //
-// Cada export es un wrapper delgado sobre los sistemas existentes. Tanto la UI
-// (handlers de botones en Game.js) como cualquier bot (HeuristicBot, LLMBot)
-// llaman exclusivamente por esta capa — así un exploit detectado por la IA
-// también lo puede reproducir un humano y viceversa (LSP).
+// Cada export es un wrapper delgado sobre los sistemas existentes. Todas las
+// acciones aceptan un `ownerId` opcional (default 'player') — el rail es
+// agnóstico al ejecutor. Tanto la UI (handlers de botones en Game.js), bots
+// (HeuristicBot, LLMBot), como brains de AI farmers llaman exclusivamente por
+// esta capa — así un exploit detectado por la IA también lo puede reproducir
+// un humano y viceversa (LSP).
 //
 // Schema de acción serializable (discriminated union, JSON-friendly):
-//   { action: 'buyTile',        tileId: 42, countryId: 'home' }
-//   { action: 'sellInventory',  producibleId: 'wheat', units: 50, countryId: 'home' }
-//   { action: 'buildIndustry',  tileId: 17, recipeId: 'flourMill', countryId: 'home' }
+//   { action: 'buyTile',       tileId: 42, countryId: 'home', ownerId: 'home_ai0' }
+//   { action: 'sellInventory', producibleId: 'wheat', units: 50, countryId: 'home' }
+//   { action: 'plantTile',     tileId: 17, producibleId: 'wheat', countryId: 'home' }
 //   { action: 'noop' }
 //
 // Dispatcher: apply(state, action) → { ok, reason?, ...details }.
-// Toda accion retorna SIEMPRE un objeto resultado — nunca lanza. Esto deja
-// al bot lidiar con fallas (mercado seco, no hay cash, tile ya tomado, etc.)
-// vía control de flujo normal.
+// Toda acción retorna SIEMPRE un objeto resultado — nunca lanza.
 
 import { tileById } from '../state/GameState.js';
 import {
@@ -26,22 +26,22 @@ import { listOnMarket, buyFromMarket } from '../systems/Market.js';
 // =============================================================================
 // Tile lifecycle
 // =============================================================================
-export function actBuyTile(state, { tileId, countryId, mode = 'cash' }) {
+export function actBuyTile(state, { tileId, countryId, mode = 'cash', ownerId = 'player' }) {
   const tile = tileById(state, countryId, tileId);
   if (!tile) return { ok: false, reason: 'tile not found' };
-  return buyTile(state, tile, { mode });
+  return buyTile(state, tile, { mode, buyerId: ownerId });
 }
 
-export function actPlowTile(state, { tileId, countryId }) {
+export function actPlowTile(state, { tileId, countryId, ownerId = 'player' }) {
   const tile = tileById(state, countryId, tileId);
   if (!tile) return { ok: false, reason: 'tile not found' };
-  return plowTile(state, tile, 'player');
+  return plowTile(state, tile, ownerId);
 }
 
-export function actPlantTile(state, { tileId, countryId, producibleId }) {
+export function actPlantTile(state, { tileId, countryId, producibleId, ownerId = 'player' }) {
   const tile = tileById(state, countryId, tileId);
   if (!tile) return { ok: false, reason: 'tile not found' };
-  return plantTile(state, tile, producibleId, 'player');
+  return plantTile(state, tile, producibleId, ownerId);
 }
 
 export function actHarvestTile(state, { tileId, countryId }) {
@@ -63,22 +63,21 @@ export function actToggleAutoReplant(state, { tileId, countryId }) {
 }
 
 // =============================================================================
-// Market trading (player wallet only — bots use this same path)
+// Market trading — listing (consignación) y compra
 // =============================================================================
-export function actSellInventory(state, { producibleId, units, countryId }) {
-  // Player lista stock en la góndola (consignación). Cash llega cuando alguien compra.
-  return listOnMarket(state, 'player', producibleId, units, countryId);
+export function actSellInventory(state, { producibleId, units, countryId, ownerId = 'player' }) {
+  return listOnMarket(state, ownerId, producibleId, units, countryId);
 }
 
-export function actBuyFromMarket(state, { producibleId, units, countryId }) {
-  return buyFromMarket(state, 'player', producibleId, units, countryId);
+export function actBuyFromMarket(state, { producibleId, units, countryId, ownerId = 'player' }) {
+  return buyFromMarket(state, ownerId, producibleId, units, countryId);
 }
 
 // =============================================================================
 // Banking
 // =============================================================================
-export function actTakeLoan(state, { productId, amount }) {
-  return applyForLoan(state, productId, amount, { borrowerId: 'player' });
+export function actTakeLoan(state, { productId, amount, ownerId = 'player' }) {
+  return applyForLoan(state, productId, amount, { borrowerId: ownerId });
 }
 
 // =============================================================================
@@ -91,8 +90,8 @@ export function actNoop() {
 // =============================================================================
 // Dispatcher
 // =============================================================================
-// Discriminated-union dispatch. Adding a new action = new entry in the
-// registry; cero cambios al motor o a los drivers (OCP).
+// Discriminated-union dispatch. Adding a new action = new entry en el registry;
+// cero cambios al motor o a los drivers (OCP).
 export const ACTION_REGISTRY = {
   noop: actNoop,
   buyTile: actBuyTile,
@@ -115,13 +114,11 @@ export function apply(state, action) {
   try {
     return fn(state, action) ?? { ok: true };
   } catch (err) {
-    // Bots never break the loop. We surface the error to the trace so the
-    // user can spot which action shape is wrong, but the simulation marches on.
     return { ok: false, reason: `threw: ${err?.message ?? err}` };
   }
 }
 
-// List of valid action names — useful when prompting an LLM.
+// Lista de acciones válidas — útil para prompts a LLM y validators.
 export function listActions() {
   return Object.keys(ACTION_REGISTRY);
 }

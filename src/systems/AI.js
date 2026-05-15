@@ -1,15 +1,9 @@
 import { AI } from '../data/tunables.js';
-import { PRODUCIBLES, PRODUCIBLE_LIST } from '../data/producibles.js';
-import { applyForLoan } from './Bank.js';
-import { tilePrice, pushLog, pushAIDecision } from '../state/GameState.js';
 import { aiTryOffer, tickOffers } from './Trade.js';
-import { lockTypeForCategory } from './Farming.js';
-import {
-  effectiveSetupCost, effectivePlowCost, effectiveHarvestCost,
-} from './Inflation.js';
-import { plantTile, plowTile } from './Farming.js';
-import { expectedPriceAt } from './Forecast.js';
 import { aiTrySellInventory } from './AISales.js';
+import { observeForActor } from '../agent/Observation.js';
+import { decideFor } from '../agent/Brains.js';
+import * as Actions from '../agent/Actions.js';
 
 // Generate AI farmers for ONE country. Each farmer claims tiles in that country's map.
 // AI ids are country-prefixed to avoid clashes across maps (e.g. `home_ai0`, `usa_ai0`).
@@ -58,135 +52,46 @@ export function createAIFarmersForCountry(state, countryId) {
       inventoryByCountry: { [countryId]: {} },
       // Fracción del inventario que el AI conserva en su wallet en vez de
       // listar al mercado. Default 0 = lista todo. Hook para personalidades
-      // futuras: un "hoarder" podría tener 0.5 (guarda mitad esperando precios
-      // mejores), un "trader" cero, un "small-scale farmer" 0.2, etc.
+      // futuras: 'hoarder' podría tener 0.5, 'trader' cero, 'small-scale' 0.2.
       keepFraction: 0,
+      // Brain pluggable. Default 'heuristic' replica la lógica histórica.
+      // Otras opciones del registry (Brains.js): 'idle' (no hace nada).
+      // Futuras personalidades se agregan al registry sin tocar el motor.
+      brainType: 'heuristic',
+      brainParams: {},   // config por-personalidad (risk tolerance, etc.)
+      brainMemory: {},   // state persistente que el brain puede usar entre ticks
     });
   }
   return farmers;
 }
 
-// Unified venture picker: scores every plant / mine option this AI could commit
-// to ON THIS TILE, returns the one with the highest monthly margin. Filters by
-// lockType, surveyed mineral, and the AI's available cash.
+// tickAI — itera cada AI farmer y delega la decisión a su brain (registrado en
+// src/agent/Brains.js). El brain es una función pura (obs, actor) → actions[]
+// que el motor aplica por el rail único de Actions.apply().
 //
-// Margin is "expected monthly cash flow" so crops and mines are comparable.
-function aiPickBestVenture(state, ai, tile) {
-  const cid = ai.countryId;
-  let best = null;
-  let bestMargin = -Infinity;
-
-  for (const def of PRODUCIBLE_LIST) {
-    const wantLock = lockTypeForCategory(def.category);
-    if (tile.lockType && wantLock && tile.lockType !== wantLock) continue;
-
-    const setupCost = effectiveSetupCost(state, cid, def)
-      + (def.requiresPlow ? effectivePlowCost(state, cid) : 0);
-    if (ai.cash < setupCost) continue;
-
-    // Look-ahead pricing: for a wheat field that won't harvest for 90 days,
-    // the relevant price is the EXPECTED price 90 days out, not today's spot.
-    // expectedPriceAt also discounts for pipeline glut from other farmers.
-    const horizon = def.growthDays || 30;
-    const priceFuture = expectedPriceAt(state, cid, def.id, horizon);
-    if (priceFuture <= 0) continue;
-    const revPerCycle = priceFuture * def.yieldUnits;
-    const harvestCost = effectiveHarvestCost(state, cid, def);
-
-    let cyclesPerMonth;
-    if (def.perennial) {
-      cyclesPerMonth = 30 / def.perennial.regrowDays;
-    } else {
-      cyclesPerMonth = 30 / def.growthDays;
-    }
-    const recurringMonthlyCost = 0;
-
-    const monthlyMargin = (revPerCycle - harvestCost) * cyclesPerMonth - recurringMonthlyCost;
-    if (monthlyMargin > bestMargin) {
-      bestMargin = monthlyMargin;
-      best = { type: 'plant', def, setupCost, monthlyMargin };
-    }
-  }
-
-  return best;
-}
-
-function aiTryHarvestAndPlant(state, ai) {
-  const map = state.maps[ai.countryId];
-  if (!map) return;
-  for (const tid of ai.ownedTileIds) {
-    const tile = map.tiles[tid];
-    if (!tile || tile.owner !== ai.id) continue;
-    if (tile.state !== 'fallow') continue;
-    const choice = aiPickBestVenture(state, ai, tile);
-    if (!choice) continue;
-    // Skip net-negative ventures — don't dig a hole.
-    if (choice.monthlyMargin <= 0) continue;
-
-    if (choice.type === 'plant') {
-      // Plow first if required (same flow as player). Both calls route cash
-      // through the unified payLaborAndCommodity helper in Farming.js.
-      if (choice.def.requiresPlow && tile.state === 'fallow') {
-        const rp = plowTile(state, tile, ai.id);
-        if (!rp.ok) continue;
-      }
-      const rPlant = plantTile(state, tile, choice.def.id, ai.id);
-      if (rPlant.ok) {
-        pushAIDecision(state, {
-          companyId: ai.id, recipeId: choice.def.id, action: 'planted',
-          reason: `monthly margin ~$${Math.round(choice.monthlyMargin)}`,
-        });
-      }
-    }
-  }
-  // Sync ownedTileIds against actual ownership (in case of foreclosure).
-  ai.ownedTileIds = map.tiles.filter(t => t.owner === ai.id).map(t => t.id);
-}
-
-function aiTryBuyLand(state, ai) {
-  if (Math.random() > AI.buyTileChance) return;
-  // AI only shops in its own country's map.
-  const map = state.maps[ai.countryId];
-  if (!map) return;
-  let best = null;
-  let bestVal = -Infinity;
-  for (const t of map.tiles) {
-    if (t.owner !== 'wild') continue;
-    const price = tilePrice(t, state);
-    if (ai.cash < price) continue;
-    const val = t.quality * 1000 - price * 0.0005;
-    if (val > bestVal) {
-      bestVal = val;
-      best = t;
-    }
-  }
-  if (best) {
-    ai.cash -= tilePrice(best, state);
-    best.owner = ai.id;
-    ai.ownedTileIds.push(best.id);
-  }
-}
-
-function aiTryLoan(state, ai) {
-  if (ai.cash >= AI.loanThreshold) return;
-  if (ai.ownedTileIds.length < 1) return;
-  const r = applyForLoan(state, 'workingCapital', AI.loanAmount, { borrowerId: ai.id });
-  if (r.ok) pushLog(state, `${ai.name} took a working capital loan.`);
-}
-
+// Cooldown: cada `ai.cooldown <= 0` el AI piensa; reset a AI.decisionEveryDays.
+// Trade.aiTryOffer e tickOffers se mantienen daily (decisión de oferta no pasa
+// por brain por ahora — futura iteración puede mudarlas).
 export function tickAI(state) {
-  // Daily: AI may roll an offer on a player tile (independent of the decision cooldown).
+  // Daily: AI puede tirar una oferta sobre un tile del player (decisión simple,
+  // no pasa por el brain todavía).
   for (const ai of state.aiFarmers) aiTryOffer(state, ai);
-  // Daily: expire stale offers
   tickOffers(state);
 
   for (const ai of state.aiFarmers) {
     ai.cooldown -= 1;
     if (ai.cooldown > 0) continue;
     ai.cooldown = AI.decisionEveryDays;
-    aiTryLoan(state, ai);
-    aiTryHarvestAndPlant(state, ai);
-    aiTryBuyLand(state, ai);
+    const obs = observeForActor(state, ai.id);
+    const decide = decideFor(ai.brainType);
+    const actions = decide(obs, ai);
+    for (const a of actions) {
+      Actions.apply(state, { ...a, ownerId: ai.id });
+    }
+    // Sync ownedTileIds contra ownership real (en caso de foreclosure que
+    // cambia tile.owner sin pasar por el rail).
+    const map = state.maps[ai.countryId];
+    if (map) ai.ownedTileIds = map.tiles.filter(t => t.owner === ai.id).map(t => t.id);
   }
 }
 

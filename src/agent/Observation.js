@@ -13,10 +13,23 @@
 import { COUNTRY_IDS, PLAYER_COUNTRY_ID } from '../data/countries.js';
 import { PRODUCIBLE_IDS } from '../data/producibles.js';
 import { priceMA, offMarketInventoryFor } from '../systems/Market.js';
+import { walletOf } from '../systems/Transactions.js';
+import { expectedPriceAt, pipelineSupplyFor } from '../systems/Forecast.js';
+import { effectiveSetupCost, effectivePlowCost, effectiveHarvestCost } from '../systems/Inflation.js';
+import { tilePrice, tileById } from '../state/GameState.js';
+import { PRODUCIBLES } from '../data/producibles.js';
 
 const WARNING_CATEGORIES = /fiscal|default|crash|foreclose|bankrupt|world-event/;
 
-export function observe(state, opts = {}) {
+// observeForActor — snapshot del state desde la perspectiva de un actor
+// específico. Es la generalización de observe(state): además del state público
+// (precios, históricos, country fiscal), incluye los datos privados del actor
+// (cash, ownedTileIds, inventory, loans) y un forecast cerrado con su country.
+//
+// El forecast se expone como closures para que el brain pueda hacer queries
+// ad-hoc (e.g., obs.forecast.expectedPriceAt('wheat', 90)) sin importarse
+// de cómo se computa.
+export function observeForActor(state, actorId, opts = {}) {
   const { includeTactical = false, eventsLimit = 50 } = opts;
 
   const time = {
@@ -26,21 +39,114 @@ export function observe(state, opts = {}) {
     totalDays: state.time.totalDays,
   };
 
-  const player = {
-    cash: state.player.cash,
-    bankrupt: state.player.bankrupt,
-    inventoryByCountry: cloneInventory(state.player.inventoryByCountry),
-    tilesOwned: listPlayerTiles(state),
+  // Country del actor — si es player, PLAYER_COUNTRY_ID; si es AI farmer,
+  // lo lee de su record (ai.countryId).
+  const actorCid = countryOfActor(state, actorId);
+
+  // Actor-specific data.
+  const wallet = walletOf(state, actorId);
+  const actor = {
+    id: actorId,
+    cash: wallet?.cash ?? 0,
+    bankrupt: wallet?.bankrupt ?? false,
+    countryId: actorCid,
+    inventoryByCountry: cloneInventory(wallet?.inventoryByCountry),
+    tilesOwned: listTilesOwnedBy(state, actorId),
     loans: (state.loans ?? [])
-      .filter(l => l.borrowerId === 'player' || l.borrowerId == null)
+      .filter(l => l.borrowerId === actorId || (actorId === 'player' && l.borrowerId == null))
       .map(l => ({
         id: l.id, productId: l.productId,
         principal: l.principal, balance: l.balance,
         monthlyPayment: l.monthlyPayment,
         status: l.status,
       })),
+    brainParams: wallet?.brainParams,
+    brainMemory: wallet?.brainMemory,
+    keepFraction: wallet?.keepFraction,
   };
 
+  const countries = collectCountries(state);
+
+  // Ventures (legacy slot, sólo se llena para el player por backward compat).
+  const ventures = actorId === 'player' ? listPlayerVentures(state) : [];
+
+  // Event slices.
+  const eh = state.eventHistory ?? [];
+  const strategic = eh.filter(e => (e.tier ?? 3) <= 2).slice(-eventsLimit);
+  const warnings = eh.filter(e => WARNING_CATEGORIES.test(e.category || '')).slice(-20);
+  const events = { strategic, warnings };
+  if (includeTactical) {
+    events.tactical = eh.filter(e => (e.tier ?? 3) === 3).slice(-eventsLimit);
+  }
+
+  // Forecast bindings — closures que ya saben el country del actor. Le dan
+  // al brain todo lo necesario para evaluar ventures (costos, precios futuros,
+  // pipeline) sin importarse del state directamente.
+  const forecast = {
+    expectedPriceAt: (pid, daysAhead) => expectedPriceAt(state, actorCid, pid, daysAhead),
+    pipelineSupplyFor: (pid) => pipelineSupplyFor(state, actorCid, pid),
+    setupCost: (pid) => effectiveSetupCost(state, actorCid, PRODUCIBLES[pid]),
+    plowCost: () => effectivePlowCost(state, actorCid),
+    harvestCost: (pid) => effectiveHarvestCost(state, actorCid, PRODUCIBLES[pid]),
+    tilePriceFor: (tileId, countryId) => {
+      const t = tileById(state, countryId ?? actorCid, tileId);
+      return t ? tilePrice(t, state) : 0;
+    },
+    // Lista de tiles wild (disponibles para comprar) en el country del actor.
+    wildTiles: () => {
+      const map = state.maps?.[actorCid];
+      if (!map) return [];
+      return map.tiles
+        .filter(t => t.owner === 'wild')
+        .map(t => ({ id: t.id, x: t.x, y: t.y, quality: round3(t.quality ?? 0), price: tilePrice(t, state) }));
+    },
+  };
+
+  return {
+    time,
+    actor,
+    countries,
+    ventures,
+    events,
+    forecast,
+    playerCountryId: PLAYER_COUNTRY_ID,
+    // Backward compat: si actorId === 'player', exponer también como `player`
+    // para que callers viejos sigan funcionando.
+    player: actorId === 'player' ? actor : undefined,
+  };
+}
+
+// observe(state) — wrapper backward compat. Equivale a observeForActor(state, 'player').
+export function observe(state, opts = {}) {
+  return observeForActor(state, 'player', opts);
+}
+
+function countryOfActor(state, actorId) {
+  if (actorId === 'player') return PLAYER_COUNTRY_ID;
+  const ai = state.aiFarmers?.find(a => a.id === actorId);
+  return ai?.countryId ?? PLAYER_COUNTRY_ID;
+}
+
+function listTilesOwnedBy(state, actorId) {
+  const out = [];
+  for (const cid of COUNTRY_IDS) {
+    const map = state.maps?.[cid];
+    if (!map) continue;
+    for (const t of map.tiles) {
+      if (t.owner !== actorId) continue;
+      out.push({
+        id: t.id, x: t.x, y: t.y, countryId: cid,
+        state: t.state, lockType: t.lockType,
+        crop: t.crop, growth: t.growth, ageDays: t.ageDays,
+        autoMode: t.autoMode, autoReplant: t.autoReplant,
+        quality: round3(t.quality ?? 0),
+      });
+    }
+  }
+  return out;
+}
+
+function collectCountries(state) {
   const countries = {};
   for (const cid of COUNTRY_IDS) {
     const c = state.countries[cid];
@@ -74,29 +180,7 @@ export function observe(state, opts = {}) {
       supplyDay, consumeDay,
     };
   }
-
-  // Ventures = industries del player + tiles farm/mine del player. El bot
-  // necesita verlos como una sola lista uniforme — no le importa la diferencia
-  // de implementación. Cada uno con `status` y `monthlyMargin30d` cuando aplica.
-  const ventures = listPlayerVentures(state);
-
-  // Event slices.
-  const eh = state.eventHistory ?? [];
-  const strategic = eh.filter(e => (e.tier ?? 3) <= 2).slice(-eventsLimit);
-  const warnings = eh.filter(e => WARNING_CATEGORIES.test(e.category || '')).slice(-20);
-  const events = { strategic, warnings };
-  if (includeTactical) {
-    events.tactical = eh.filter(e => (e.tier ?? 3) === 3).slice(-eventsLimit);
-  }
-
-  return {
-    time,
-    player,
-    countries,
-    ventures,
-    events,
-    playerCountryId: PLAYER_COUNTRY_ID,
-  };
+  return countries;
 }
 
 // =============================================================================
@@ -114,25 +198,6 @@ function cloneInventory(byCountry) {
       if (qty) inner[pid] = Math.round(qty);
     }
     out[cid] = inner;
-  }
-  return out;
-}
-
-function listPlayerTiles(state) {
-  const out = [];
-  for (const cid of COUNTRY_IDS) {
-    const map = state.maps?.[cid];
-    if (!map) continue;
-    for (const t of map.tiles) {
-      if (t.owner !== 'player') continue;
-      out.push({
-        id: t.id, x: t.x, y: t.y, countryId: cid,
-        state: t.state, lockType: t.lockType,
-        crop: t.crop, growth: t.growth, ageDays: t.ageDays,
-        autoMode: t.autoMode, autoReplant: t.autoReplant,
-        quality: round3(t.quality ?? 0),
-      });
-    }
   }
   return out;
 }

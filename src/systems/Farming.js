@@ -245,20 +245,33 @@ function tickFarmingTile(state, tile) {
 // opts = { mode: 'cash' | 'finance' }
 export function buyTile(state, tile, opts = {}) {
   const mode = opts.mode || 'cash';
+  const buyerId = opts.buyerId || 'player';
   if (tile.owner !== 'wild') return { ok: false, reason: 'Not available' };
   const cost = tilePrice(tile, state);
+  const wallet = walletFor(state, buyerId);
+  if (!wallet) return { ok: false, reason: 'No wallet for buyer' };
 
   if (mode === 'cash') {
-    if (state.player.cash < cost) return { ok: false, reason: 'Not enough cash' };
-    state.player.cash -= cost;
-    tile.owner = 'player';
-    pushLog(state, `Bought tile (${tile.x},${tile.y}) for $${cost} cash`);
-    pushFx(state, { type: 'sfx', kind: 'thump' });
-    pushFx(state, { type: 'bounceTile', tileId: tile.id, scale: 1.2 });
+    if (wallet.cash < cost) return { ok: false, reason: 'Not enough cash' };
+    wallet.cash -= cost;
+    tile.owner = buyerId;
+    if (buyerId === 'player') {
+      pushLog(state, `Bought tile (${tile.x},${tile.y}) for $${cost} cash`);
+      pushFx(state, { type: 'sfx', kind: 'thump' });
+      pushFx(state, { type: 'bounceTile', tileId: tile.id, scale: 1.2 });
+    }
+    // Si el buyer es un AI farmer, agregar el tile a su ownedTileIds para
+    // que el motor lo trate como suyo.
+    if (buyerId !== 'player') {
+      const ai = state.aiFarmers?.find(a => a.id === buyerId);
+      if (ai && !ai.ownedTileIds.includes(tile.id)) ai.ownedTileIds.push(tile.id);
+    }
     return { ok: true, cost, mode };
   }
 
   if (mode === 'finance') {
+    // Finance sólo para player por ahora (loans con collateralTileId).
+    if (buyerId !== 'player') return { ok: false, reason: 'Finance only for player' };
     const r = applyForLoan(state, 'landFinance', cost, { collateralTileId: tile.id });
     if (!r.ok) return { ok: false, reason: r.reason };
     state.player.cash -= r.loan.balance;

@@ -4,8 +4,8 @@
 //     decide(observation, actionsModule) → Action[]
 //   }
 //
-// Donde `Action` es `{ action: 'name', ...args }` (ver PlayerActions.js).
-// `actionsModule` es el módulo PlayerActions completo — útil cuando el bot
+// Donde `Action` es `{ action: 'name', ...args }` (ver Actions.js).
+// `actionsModule` es el módulo Actions completo — útil cuando el bot
 // quiere usar `listActions()` para descubrir su superficie sin hardcodear.
 //
 // LSP: HumanDriver, HeuristicBot, LLMBot son intercambiables. El Loop no
