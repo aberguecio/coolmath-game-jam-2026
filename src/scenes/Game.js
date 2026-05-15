@@ -2013,6 +2013,10 @@ export class Game extends Phaser.Scene {
     this.priceChartGfx = this.add.graphics().setDepth(63);
     frame.group.add(this.priceChartGfx);
     this.priceChartDynamic = [];
+    // Hover overlay (encima del chart). Lo usa _drawChartHover.
+    this.priceChartHoverGfx = this.add.graphics().setDepth(65);
+    frame.group.add(this.priceChartHoverGfx);
+    this.priceChartHoverDynamic = [];
   }
 
   // Called from the Market modal sparkline. Locks producible+country y abre
@@ -2045,6 +2049,7 @@ export class Game extends Phaser.Scene {
     s.ui.priceChartOpen = open;
     this.priceChartFrame.group.setVisible(open);
     if (open) this.refreshPriceChartModal();
+    else this._clearChartHover();
     this.refreshTopBar();
   }
 
@@ -2275,10 +2280,18 @@ export class Game extends Phaser.Scene {
     const plotW = plotRight - plotLeft;
     const plotH = plotBottom - plotTop;
 
-    // Min/max sobre todas las series del modo activo (escala compartida)
+    // ---- Toggle de visibilidad por serie ----
+    // s.ui.priceChartHidden[`${mode}:${seriesKey}`] = true si oculta.
+    // El click en una entrada del legend togglea ese flag.
+    const serKey = (ser) => `${mode}:${ser.key ?? '_value'}`;
+    s.ui.priceChartHidden ||= {};
+    const isHidden = (ser) => !!s.ui.priceChartHidden[serKey(ser)];
+    const visibleSeries = series.filter(ser => !isHidden(ser));
+
+    // Min/max sobre las series VISIBLES (escala compartida, ignora ocultas)
     let minV = Infinity, maxV = -Infinity;
     for (const rec of samples) {
-      for (const ser of series) {
+      for (const ser of visibleSeries) {
         const v = valueOf(rec, ser);
         if (v < minV) minV = v;
         if (v > maxV) maxV = v;
@@ -2354,10 +2367,9 @@ export class Game extends Phaser.Scene {
       }
     }
 
-    // ---- Líneas de las series + legend (legend sólo si >1 serie) ----
-    let legendX = plotRight - 10;
-    for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
-      const ser = series[sIdx];
+    // ---- Líneas de las series VISIBLES ----
+    for (let sIdx = visibleSeries.length - 1; sIdx >= 0; sIdx--) {
+      const ser = visibleSeries[sIdx];
       this.priceChartGfx.lineStyle(ser.width ?? 2, ser.color, 1);
       this.priceChartGfx.beginPath();
       for (let i = 0; i < samples.length; i++) {
@@ -2367,23 +2379,62 @@ export class Game extends Phaser.Scene {
         else this.priceChartGfx.lineTo(px, py);
       }
       this.priceChartGfx.strokePath();
-      if (series.length >= 2) {
+    }
+
+    // ---- Legend (TODAS las series, click togglea visibilidad) ----
+    if (series.length >= 2) {
+      let legendX = plotRight - 10;
+      for (let sIdx = series.length - 1; sIdx >= 0; sIdx--) {
+        const ser = series[sIdx];
+        const hidden = isHidden(ser);
         const labW = ser.label.length * 7 + 16;
-        const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color)
-          .setOrigin(1, 0).setDepth(63);
+        // Hit zone englobando sq + label, clickable
+        const hit = this.add.rectangle(legendX - labW - 4, plotTop + 2, labW + 8, 14, 0x000000, 0.01)
+          .setOrigin(1, 0).setDepth(63).setInteractive({ useHandCursor: true });
+        const sq = this.add.rectangle(legendX - labW, plotTop + 4, 8, 8, ser.color, hidden ? 0.25 : 1)
+          .setOrigin(1, 0).setDepth(64);
+        const labColor = hidden
+          ? '#566370'
+          : '#' + ser.color.toString(16).padStart(6, '0');
         const lab = this.add.text(legendX - labW + 4, plotTop + 4, ser.label, {
-          fontFamily: 'monospace', fontSize: '10px',
-          color: '#' + ser.color.toString(16).padStart(6, '0'),
-        }).setOrigin(0, 0).setDepth(63);
+          fontFamily: 'monospace', fontSize: '10px', color: labColor,
+        }).setOrigin(0, 0).setDepth(64);
+        if (hidden) lab.setFontStyle('italic');
+        hit.on('pointerover', () => hit.setFillStyle(0xffffff, 0.08));
+        hit.on('pointerout', () => hit.setFillStyle(0x000000, 0.01));
+        hit.on('pointerdown', () => {
+          s.ui.priceChartHidden[serKey(ser)] = !s.ui.priceChartHidden[serKey(ser)];
+          this.refreshPriceChartModal();
+        });
+        this.priceChartFrame.group.add(hit);
         this.priceChartFrame.group.add(sq); this.priceChartFrame.group.add(lab);
-        this.priceChartDynamic.push(sq, lab);
+        this.priceChartDynamic.push(hit, sq, lab);
         legendX -= (labW + 14);
       }
     }
 
+    // ---- Hover tooltip ----
+    // Hit zone transparente sobre el plot area. Al mover el mouse muestra
+    // un guide vertical + dots + tooltip con los valores de cada serie visible
+    // en ese día.
+    this._clearChartHover();
+    const hoverHit = this.add.rectangle(plotLeft, plotTop, plotW, plotH, 0x000000, 0.001)
+      .setOrigin(0, 0).setDepth(62).setInteractive({ useHandCursor: false });
+    hoverHit.on('pointermove', (pointer) => {
+      const localX = pointer.x - plotLeft;
+      if (localX < 0 || localX > plotW || samples.length < 2) return;
+      const idx = Math.round((localX / plotW) * (samples.length - 1));
+      this._drawChartHover(idx, samples, visibleSeries, valueOf, {
+        plotLeft, plotRight, plotTop, plotBottom, plotW, plotH, yMin, yRange,
+      }, yUnit, mode, s);
+    });
+    hoverHit.on('pointerout', () => this._clearChartHover());
+    this.priceChartFrame.group.add(hoverHit);
+    this.priceChartDynamic.push(hoverHit);
+
     // Min/max markers — price + stocks (flows son ruidosos, marker poco útil)
     if (mode === 'price' || mode === 'stocks') {
-      for (const ser of series) {
+      for (const ser of visibleSeries) {
         let minI = 0, maxI = 0;
         for (let i = 1; i < samples.length; i++) {
           if (valueOf(samples[i], ser) < valueOf(samples[minI], ser)) minI = i;
@@ -2396,6 +2447,82 @@ export class Game extends Phaser.Scene {
           this.priceChartGfx.fillCircle(px, py, 3);
         }
       }
+    }
+  }
+
+  // Clear hover state: gfx + dynamic labels. Llamado en refresh y en pointerout.
+  _clearChartHover() {
+    if (this.priceChartHoverGfx) this.priceChartHoverGfx.clear();
+    if (this.priceChartHoverDynamic) {
+      for (const n of this.priceChartHoverDynamic) n.destroy();
+      this.priceChartHoverDynamic = [];
+    }
+  }
+
+  // Dibuja el guide line vertical + dots por serie + tooltip box con valores
+  // en el índice dado. Llamado en pointermove sobre el hit zone del plot area.
+  _drawChartHover(idx, samples, visibleSeries, valueOf, dims, yUnit, mode, s) {
+    const { plotLeft, plotRight, plotTop, plotBottom, plotW, plotH, yMin, yRange } = dims;
+    this._clearChartHover();
+
+    const px = plotLeft + (idx / Math.max(1, samples.length - 1)) * plotW;
+    const rec = samples[idx];
+
+    // Guide vertical
+    this.priceChartHoverGfx.lineStyle(1, 0xcdd6df, 0.35);
+    this.priceChartHoverGfx.lineBetween(px, plotTop, px, plotBottom);
+
+    // Day label (si es number, samples son numbers en price mode; si objeto, hay rec.day)
+    let dayLabel;
+    if (typeof rec === 'object' && rec.day != null) {
+      dayLabel = `day ${rec.day}`;
+    } else {
+      // En price mode samples son números; computar el day por offset.
+      const totalDays = s.time?.totalDays ?? 0;
+      const startDay = totalDays - (samples.length - 1);
+      dayLabel = `day ${startDay + idx}`;
+    }
+
+    // Formato del valor según yUnit del modo
+    const fmtVal = (val) => yUnit === '$' ? `$${val.toFixed(2)}`
+                          : yUnit === 'u' ? `${Math.round(val)}u`
+                          : val.toFixed(3);
+
+    // Dots + texto por serie
+    const lines = [{ color: 0xcdd6df, text: dayLabel }];
+    for (const ser of visibleSeries) {
+      const val = valueOf(rec, ser);
+      const py = plotBottom - ((val - yMin) / yRange) * plotH;
+      this.priceChartHoverGfx.fillStyle(ser.color, 1);
+      this.priceChartHoverGfx.fillCircle(px, py, 4);
+      this.priceChartHoverGfx.lineStyle(1.5, 0x0f1923, 1);
+      this.priceChartHoverGfx.strokeCircle(px, py, 4);
+      lines.push({ color: ser.color, text: `${ser.label}: ${fmtVal(val)}` });
+    }
+
+    // Tooltip box — a la derecha del cursor por defecto; flip a la izquierda si no entra.
+    const lineH = 13;
+    const padX = 6, padY = 4;
+    const boxW = 160;
+    const boxH = padY * 2 + lines.length * lineH;
+    let boxX = px + 10;
+    if (boxX + boxW > plotRight) boxX = px - 10 - boxW;
+    const boxY = Math.max(plotTop + 2, Math.min(plotBottom - boxH - 2, plotTop + 8));
+
+    const bg = this.add.rectangle(boxX, boxY, boxW, boxH, 0x131e2b, 0.92)
+      .setOrigin(0, 0).setDepth(66).setStrokeStyle(1, 0x3a4d63);
+    this.priceChartFrame.group.add(bg);
+    this.priceChartHoverDynamic.push(bg);
+
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      const colorHex = '#' + ln.color.toString(16).padStart(6, '0');
+      const t = this.add.text(boxX + padX, boxY + padY + i * lineH, ln.text, {
+        fontFamily: 'monospace', fontSize: '10px', color: colorHex,
+        fontStyle: i === 0 ? 'bold' : 'normal',
+      }).setDepth(67);
+      this.priceChartFrame.group.add(t);
+      this.priceChartHoverDynamic.push(t);
     }
   }
 
